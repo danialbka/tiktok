@@ -15,7 +15,7 @@ class Settings:
     db_path: Path
     download_dir: Path
     artifact_dir: Path
-    max_duration_seconds: int
+    max_duration_seconds: int | None
     default_language: str
     enable_script_context: bool
 
@@ -36,7 +36,7 @@ class Settings:
             db_path=Path(os.getenv("MOVIE_SHORTS_DB_PATH", "data/movie_shorts.db")),
             download_dir=Path(os.getenv("MOVIE_SHORTS_DOWNLOAD_DIR", ".cache/downloads")),
             artifact_dir=Path(os.getenv("MOVIE_SHORTS_ARTIFACT_DIR", "artifacts")),
-            max_duration_seconds=int(os.getenv("MOVIE_SHORTS_MAX_DURATION_SECONDS", "180")),
+            max_duration_seconds=_optional_int(os.getenv("MOVIE_SHORTS_MAX_DURATION_SECONDS")),
             default_language=os.getenv("MOVIE_SHORTS_DEFAULT_LANGUAGE", "en"),
             enable_script_context=os.getenv("MOVIE_SHORTS_ENABLE_SCRIPT_CONTEXT", "true").lower() in {"1", "true", "yes", "on"},
         )
@@ -47,3 +47,12 @@ class Settings:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _optional_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"", "0", "none", "null", "off", "false"}:
+        return None
+    return int(normalized)

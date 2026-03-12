@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import shutil
 
 from .config import Settings
 from .models import JobManifest
@@ -46,21 +47,27 @@ class Pipeline:
             synced.append(job_id)
         return synced
 
-    def batch_run(self, limit: int = 5, target_duration_seconds: int | None = None) -> list[int]:
+    def batch_run(
+        self,
+        limit: int = 5,
+        target_duration_seconds: int | None = None,
+        render_mode: str = "crop",
+        variant_count: int = 5,
+    ) -> list[int]:
         jobs = self.store.list_jobs(status="discovered", limit=limit)
         completed: list[int] = []
         for row in jobs:
             job_id = int(row["id"])
             try:
-                self.plan_job(job_id, target_duration_seconds=target_duration_seconds)
-                self.render_job(job_id)
+                self.plan_job(job_id, target_duration_seconds=target_duration_seconds, variant_count=variant_count)
+                self.render_job(job_id, render_mode=render_mode)
             except Exception as exc:
                 self._mark_failed(job_id, exc)
                 continue
             completed.append(job_id)
         return completed
 
-    def plan_job(self, job_id: int, target_duration_seconds: int | None = None) -> Path:
+    def plan_job(self, job_id: int, target_duration_seconds: int | None = None, variant_count: int = 5) -> Path:
         row = self.store.get_job(job_id)
         job_dir = self.settings.artifact_dir / str(job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +104,7 @@ class Pipeline:
             self.settings.max_duration_seconds,
             script_context=script_context,
             target_duration_seconds=target_duration_seconds,
+            variant_count=variant_count,
         )
         manifest.job_id = job_id
         manifest.filename = str(row["filename"])
@@ -112,6 +120,7 @@ class Pipeline:
             manifest.planner_notes.append(f"Script context fetch skipped after error: {script_context_error}")
         if target_duration_seconds:
             manifest.planner_notes.append(f"Requested target duration: {target_duration_seconds} seconds.")
+        manifest.planner_notes.append(f"Requested variant count: {variant_count}.")
 
         manifest_path = job_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
@@ -126,7 +135,7 @@ class Pipeline:
         self.store.add_event(job_id, "planned", {"manifest_path": str(manifest_path)})
         return manifest_path
 
-    def render_job(self, job_id: int) -> Path:
+    def render_job(self, job_id: int, render_mode: str = "crop") -> Path:
         row = self.store.get_job(job_id)
         if row["status"] not in {"planned", "rendering", "completed"}:
             raise RuntimeError(f"Job {job_id} is not planned yet.")
@@ -136,13 +145,74 @@ class Pipeline:
         source_video = Path(row["local_video_path"])
         cues = load_cues(Path(row["local_subtitle_path"]))
 
-        output_path = self.settings.artifact_dir / str(job_id) / "short.mp4"
+        job_dir = self.settings.artifact_dir / str(job_id)
+        output_path = job_dir / "short.mp4"
+        variants_dir = job_dir / "variants"
+        variants_dir.mkdir(parents=True, exist_ok=True)
         self.store.update_job(job_id, status="rendering", last_error=None)
-        rendered = render_short(manifest, source_video, cues, self.settings.artifact_dir / str(job_id) / "work", output_path)
+        manifest.render_mode = render_mode
+        variant_manifests = manifest.variants or []
+        if not variant_manifests and manifest.clips:
+            from .models import StoryVariant
+
+            variant_manifests = [
+                StoryVariant(
+                    variant_id=1,
+                    label="Variant 1",
+                    selection_reason="Primary planned cut.",
+                    beats=manifest.beats,
+                    clips=manifest.clips,
+                )
+            ]
+            manifest.variants = variant_manifests
+
+        rendered_outputs: list[Path] = []
+        for variant in variant_manifests:
+            variant_output = variants_dir / f"short_{variant.variant_id:02d}.mp4"
+            variant_work_dir = job_dir / "work" / f"variant_{variant.variant_id:02d}"
+            variant_manifest = JobManifest(
+                job_id=manifest.job_id,
+                filename=manifest.filename,
+                source_video_path=manifest.source_video_path,
+                subtitle_source=manifest.subtitle_source,
+                subtitle_path=manifest.subtitle_path,
+                total_runtime_seconds=manifest.total_runtime_seconds,
+                render_mode=render_mode,
+                beats=variant.beats,
+                clips=variant.clips,
+                script_context=manifest.script_context,
+                planner_notes=manifest.planner_notes,
+            )
+            rendered_variant = render_short(
+                variant_manifest,
+                source_video,
+                cues,
+                variant_work_dir,
+                variant_output,
+                render_mode=render_mode,
+            )
+            variant.render_output_path = str(rendered_variant)
+            rendered_outputs.append(rendered_variant)
+
+        if not rendered_outputs:
+            raise RuntimeError(f"Job {job_id} has no renderable variants.")
+
+        shutil.copy2(rendered_outputs[0], output_path)
+        rendered = output_path
+        manifest.beats = manifest.variants[0].beats
+        manifest.clips = manifest.variants[0].clips
         manifest.render_output_path = str(rendered)
         manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
         self.store.update_job(job_id, status="completed", output_path=str(rendered))
-        self.store.add_event(job_id, "rendered", {"output_path": str(rendered)})
+        self.store.add_event(
+            job_id,
+            "rendered",
+            {
+                "output_path": str(rendered),
+                "variant_outputs": [str(path) for path in rendered_outputs],
+                "render_mode": render_mode,
+            },
+        )
         return rendered
 
     def retry_job(self, job_id: int) -> None:
@@ -201,7 +271,7 @@ class Pipeline:
 
     @staticmethod
     def _manifest_from_dict(data: dict) -> JobManifest:
-        from .models import RenderClip, ScriptContextSource, StoryBeat
+        from .models import RenderClip, ScriptContextSource, StoryBeat, StoryVariant
 
         return JobManifest(
             job_id=int(data["job_id"]),
@@ -210,8 +280,20 @@ class Pipeline:
             subtitle_source=data["subtitle_source"],
             subtitle_path=data["subtitle_path"],
             total_runtime_seconds=float(data["total_runtime_seconds"]),
+            render_mode=str(data.get("render_mode") or "crop"),
             beats=[StoryBeat(**beat) for beat in data["beats"]],
             clips=[RenderClip(**clip) for clip in data["clips"]],
+            variants=[
+                StoryVariant(
+                    variant_id=int(variant["variant_id"]),
+                    label=variant["label"],
+                    selection_reason=variant["selection_reason"],
+                    beats=[StoryBeat(**beat) for beat in variant.get("beats", [])],
+                    clips=[RenderClip(**clip) for clip in variant.get("clips", [])],
+                    render_output_path=variant.get("render_output_path"),
+                )
+                for variant in data.get("variants", [])
+            ],
             script_context=[ScriptContextSource(**source) for source in data.get("script_context", [])],
             planner_notes=list(data.get("planner_notes") or []),
             render_output_path=data.get("render_output_path"),

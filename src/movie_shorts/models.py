@@ -89,6 +89,16 @@ class ScriptContextSource:
 
 
 @dataclass(slots=True)
+class StoryVariant:
+    variant_id: int
+    label: str
+    selection_reason: str
+    beats: list[StoryBeat] = field(default_factory=list)
+    clips: list[RenderClip] = field(default_factory=list)
+    render_output_path: str | None = None
+
+
+@dataclass(slots=True)
 class JobManifest:
     job_id: int
     filename: str
@@ -96,8 +106,10 @@ class JobManifest:
     subtitle_source: str
     subtitle_path: str
     total_runtime_seconds: float
+    render_mode: str = "crop"
     beats: list[StoryBeat] = field(default_factory=list)
     clips: list[RenderClip] = field(default_factory=list)
+    variants: list[StoryVariant] = field(default_factory=list)
     script_context: list[ScriptContextSource] = field(default_factory=list)
     planner_notes: list[str] = field(default_factory=list)
     render_output_path: str | None = None
@@ -107,5 +119,6 @@ class JobManifest:
         data = asdict(self)
         data["beats"] = [asdict(item) for item in self.beats]
         data["clips"] = [asdict(item) for item in self.clips]
+        data["variants"] = [asdict(item) for item in self.variants]
         data["script_context"] = [asdict(item) for item in self.script_context]
         return data

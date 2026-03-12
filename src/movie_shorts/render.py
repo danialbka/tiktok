@@ -48,8 +48,11 @@ def render_short(
     cues: list[SubtitleCue],
     work_dir: Path,
     output_path: Path,
+    render_mode: str | None = None,
 ) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
+    selected_mode = render_mode or manifest.render_mode or "crop"
+    filter_flag, filter_value = _video_filter_args(selected_mode)
     parts: list[Path] = []
     for clip_index, clip in enumerate(manifest.clips, start=1):
         part_path = work_dir / f"clip_{clip_index:02d}.mp4"
@@ -63,8 +66,8 @@ def render_short(
             f"{duration_seconds:.3f}",
             "-i",
             str(source_video),
-            "-vf",
-            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+            filter_flag,
+            filter_value,
             "-af",
             "loudnorm",
             "-c:v",
@@ -123,6 +126,20 @@ def render_short(
         ]
     )
     return output_path
+
+
+def _video_filter_args(render_mode: str) -> tuple[str, str]:
+    if render_mode == "crop":
+        return ("-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920")
+    if render_mode == "fit":
+        return (
+            "-filter_complex",
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+            "boxblur=20:10,crop=1080:1920[bg];"
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2",
+        )
+    raise ValueError(f"Unsupported render mode: {render_mode}")
 
 
 def _format_timestamp(value_ms: int) -> str:

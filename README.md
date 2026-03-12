@@ -2,7 +2,7 @@
 
 Generate TikTok-style or Shorts-style vertical videos from movies already in your Real-Debrid account.
 
-The pipeline downloads a source movie from Real-Debrid, finds subtitles, builds a short story arc from timed dialogue, enriches planning with screenplay or transcript context when available, and renders a 9:16 captioned export.
+The pipeline downloads a source movie from Real-Debrid, finds subtitles, builds a story arc from timed dialogue, enriches planning with screenplay or transcript context when available, and renders a 9:16 captioned export.
 
 ## What It Does
 
@@ -15,7 +15,7 @@ The pipeline downloads a source movie from Real-Debrid, finds subtitles, builds 
   - `IMSDb`
   - `SimplyScripts`
   - general web search
-- Plans a compact chronological story arc up to 3 minutes, or a custom target duration up to 180 seconds.
+- Plans a story arc whose runtime is inferred from the material unless you explicitly set a target duration.
 - Renders a vertical video with burned subtitles using yellow `Arial WGL Bold Italic`.
 
 ## Requirements
@@ -93,16 +93,28 @@ Plan a longer cut:
 uv run movie-shorts plan 18 --target-duration 120
 ```
 
-### 4. Render the short
+Plan 5 different cut options for the same movie:
+
+```bash
+uv run movie-shorts plan 18 --target-duration 120 --variant-count 5
+```
+
+### 4. Render the short(s)
 
 ```bash
 uv run movie-shorts render 18
 ```
 
+Render with the full horizontal frame preserved inside a 9:16 canvas:
+
+```bash
+uv run movie-shorts render 18 --render-mode fit
+```
+
 ### 5. Run a small batch
 
 ```bash
-uv run movie-shorts batch-run --limit 3 --target-duration 120
+uv run movie-shorts batch-run --limit 3 --target-duration 120 --variant-count 5
 ```
 
 ### 6. Retry a failed job
@@ -124,12 +136,14 @@ uv run movie-shorts -help
 - Per-job artifacts: `artifacts/<job_id>/`
 - Plan manifest: `artifacts/<job_id>/manifest.json`
 - Final video: `artifacts/<job_id>/short.mp4`
+- Variant videos: `artifacts/<job_id>/variants/short_01.mp4` through `short_05.mp4`
 
 Each manifest records:
 
 - subtitle source
 - selected beats
 - rendered clips
+- cut variants
 - planner notes
 - script or transcript context used for planning
 
@@ -167,3 +181,10 @@ uv run movie-shorts render 18
 - Story planning is much better with screenplay or transcript context, but timestamps still come from subtitles.
 - Some titles may have no public script coverage and will fall back to subtitle-only planning.
 - Rendering large 4K sources can take a while because clip extraction and subtitle burn-in re-encode video.
+- Render modes:
+  - `crop`: center-crop to fill 9:16
+  - `fit`: keep the horizontal frame visible inside 9:16 with a blurred background
+- Duration behavior:
+  - by default the planner infers how short or long the cut should be from scene continuity and context
+  - `--target-duration` overrides that when you want a specific runtime
+  - `MOVIE_SHORTS_MAX_DURATION_SECONDS` is optional and acts only as a cap when set

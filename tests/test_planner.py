@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from movie_shorts.models import ScriptContextSource, SubtitleCue
 from movie_shorts.planner import build_scene_blocks, choose_story_beats
@@ -113,6 +114,62 @@ def test_choose_story_beats_can_target_longer_duration() -> None:
     assert len(manifest.clips) >= 5
     assert manifest.clips[-1].output_end_ms >= 90_000
     assert any("targeted approximately 120 seconds" in note.lower() for note in manifest.planner_notes)
+
+
+def test_choose_story_beats_can_infer_duration_beyond_three_minutes() -> None:
+    cues = []
+    start = 0
+    for scene_index in range(8):
+        for line_index in range(3):
+            cues.append(
+                SubtitleCue(
+                    index=len(cues) + 1,
+                    start_ms=start,
+                    end_ms=start + 9_000,
+                    text=f"Scene {scene_index} confession secret trial police betrayal line {line_index}",
+                )
+            )
+            start += 10_000
+        start += 4_000
+
+    manifest = choose_story_beats(cues, max_duration_seconds=None, variant_count=5)
+
+    inferred_note = next(note for note in manifest.planner_notes if "contextual duration target" in note.lower())
+    inferred_seconds = int(re.search(r"(\d+)\s+seconds", inferred_note).group(1))
+
+    assert inferred_seconds > 180
+    assert manifest.clips[-1].output_end_ms >= 170_000
+
+
+def test_choose_story_beats_generates_multiple_distinct_variants() -> None:
+    cues = []
+    start = 0
+    sections = [
+        "family dinner confession secret truth",
+        "doctor warning trial police evidence",
+        "tunnel escape blood knife alibi",
+        "attic reveal mother daughter betrayal",
+        "lake confrontation midnight fire confession",
+    ]
+    for section in sections:
+        for _ in range(6):
+            cues.append(
+                SubtitleCue(
+                    index=len(cues) + 1,
+                    start_ms=start,
+                    end_ms=start + 7_000,
+                    text=section,
+                )
+            )
+            start += 10_000
+
+    manifest = choose_story_beats(cues, max_duration_seconds=180, target_duration_seconds=120, variant_count=5)
+
+    assert len(manifest.variants) == 5
+    assert manifest.beats == manifest.variants[0].beats
+    variant_starts = {tuple(clip.source_start_ms for clip in variant.clips) for variant in manifest.variants}
+    assert len(variant_starts) >= 3
+    assert any("generated 5 distinct cut variants" in note.lower() for note in manifest.planner_notes)
 
 
 def test_longform_target_prefers_contiguous_arc_over_scattered_peaks() -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 import math
 import re
 
-from .models import JobManifest, RenderClip, ScriptContextSource, StoryBeat, SubtitleCue
+from .models import JobManifest, RenderClip, ScriptContextSource, StoryBeat, StoryVariant, SubtitleCue
 
 
 WORD_RE = re.compile(r"[A-Za-z0-9']+")
@@ -90,6 +90,13 @@ class ScreenplayScene:
     order: int
     provider: str
     source_title: str
+
+
+@dataclass(slots=True)
+class VariantCandidate:
+    windows: list[SubtitleWindow]
+    score: float
+    selection_reason: str
 
 
 def _window_summary(text: str, limit: int = 18) -> str:
@@ -405,11 +412,34 @@ def _screenplay_alignment_ratio(windows: list[SubtitleWindow]) -> float:
     return aligned / len(windows)
 
 
+def _infer_contextual_target_ms(
+    scene_blocks: list[SubtitleWindow],
+    total_runtime_ms: int,
+    duration_cap_ms: int,
+) -> int:
+    if not scene_blocks:
+        return max(15_000, min(duration_cap_ms, total_runtime_ms))
+
+    average_block_ms = sum(block.end_ms - block.start_ms for block in scene_blocks) / len(scene_blocks)
+    screenplay_alignment = _screenplay_alignment_ratio(scene_blocks)
+    average_score = sum(block.score for block in scene_blocks) / len(scene_blocks)
+
+    desired_blocks = 2.0 + min(len(scene_blocks), 8) * 0.55
+    desired_blocks += screenplay_alignment * 1.5
+    desired_blocks += min(1.5, average_score / 18.0)
+    desired_blocks = min(float(len(scene_blocks)), max(2.0, desired_blocks))
+
+    inferred = int(average_block_ms * desired_blocks)
+    inferred = max(15_000, inferred)
+    return min(duration_cap_ms, inferred, total_runtime_ms)
+
+
 def choose_story_beats(
     cues: list[SubtitleCue],
-    max_duration_seconds: int,
+    max_duration_seconds: int | None,
     script_context: list[ScriptContextSource] | None = None,
     target_duration_seconds: int | None = None,
+    variant_count: int = 5,
 ) -> JobManifest:
     total_runtime_ms = max(cue.end_ms for cue in cues)
     windows = build_windows(cues)
@@ -419,18 +449,28 @@ def choose_story_beats(
 
     total_runtime_seconds = total_runtime_ms / 1000
     ordered = sorted(windows, key=lambda item: item.start_ms)
-    target_duration_ms = min(
-        max_duration_seconds * 1000,
-        max(15_000, int((target_duration_seconds or max_duration_seconds) * 1000)),
+    scene_blocks = build_scene_blocks(cues)
+    _apply_script_context(scene_blocks, script_context or [])
+    duration_cap_ms = min(total_runtime_ms, max_duration_seconds * 1000) if max_duration_seconds else total_runtime_ms
+    contextual_target_ms = _infer_contextual_target_ms(
+        scene_blocks=scene_blocks or ordered,
+        total_runtime_ms=total_runtime_ms,
+        duration_cap_ms=duration_cap_ms,
     )
+    target_duration_ms = min(
+        duration_cap_ms,
+        max(15_000, int((target_duration_seconds * 1000) if target_duration_seconds else contextual_target_ms)),
+    )
+    desired_variants = max(1, variant_count)
+    longform_mode = bool((target_duration_seconds is not None and target_duration_seconds >= 90) or (target_duration_seconds is None and target_duration_ms >= 90_000))
 
-    if target_duration_seconds and target_duration_seconds >= 90:
-        scene_blocks = build_scene_blocks(cues)
-        _apply_script_context(scene_blocks, script_context or [])
+    if longform_mode:
         has_screenplay_mapping = any(window.screenplay_scene_index is not None for window in scene_blocks)
-        selected_windows = _select_contiguous_story_arc(scene_blocks, target_duration_ms)
-        beats, clips = _build_clips(selected_windows, target_duration_ms, total_runtime_ms, chronological=True)
-        planner_notes = [f"Planner targeted approximately {target_duration_seconds} seconds using a contiguous chronological story arc."]
+        variant_candidates = _rank_contiguous_story_arcs(scene_blocks, target_duration_ms)
+        selected_candidates = _select_diverse_candidates(variant_candidates, desired_variants)
+        if not selected_candidates:
+            selected_candidates = [VariantCandidate(windows=_select_contiguous_story_arc(scene_blocks, target_duration_ms), score=0.0, selection_reason="Fallback contiguous arc.")]
+        planner_notes = [f"Planner targeted approximately {round(target_duration_ms / 1000)} seconds using a contiguous chronological story arc."]
         if has_screenplay_mapping:
             planner_notes.append(
                 "Planner maps subtitle scene blocks onto screenplay scenes, then favors arcs that move through neighboring screenplay scenes with strong dialogue continuity."
@@ -440,34 +480,27 @@ def choose_story_beats(
                 "Planner groups subtitles into scene-like blocks and favors arcs with strong chronological dialogue continuity when screenplay scenes are unavailable."
             )
     else:
-        hook = max(windows, key=lambda item: item.score)
-
-        context_candidates = [item for item in ordered if item.start_ms < hook.start_ms]
-        context = context_candidates[max(0, math.floor(len(context_candidates) * 0.55))] if context_candidates else ordered[0]
-
-        escalation_candidates = [item for item in ordered if item.start_ms > context.start_ms and item.start_ms != hook.start_ms]
-        escalation = max(escalation_candidates or ordered, key=lambda item: item.score)
-
-        payoff_candidates = [item for item in ordered if item.start_ms > escalation.start_ms]
-        payoff = max(payoff_candidates or ordered[-2:], key=lambda item: item.score)
-
-        unique_windows: list[SubtitleWindow] = []
-        for item in (hook, context, escalation, payoff):
-            if all(existing.start_ms != item.start_ms for existing in unique_windows):
-                unique_windows.append(item)
-        beats, clips = _build_clips(unique_windows, target_duration_ms, total_runtime_ms, chronological=False)
+        variant_candidates = _rank_hook_variants(ordered, target_duration_ms)
+        selected_candidates = _select_diverse_candidates(variant_candidates, desired_variants)
+        if not selected_candidates:
+            base_windows = _build_default_hook_variant(ordered)
+            selected_candidates = [VariantCandidate(windows=base_windows, score=0.0, selection_reason="Fallback hook-forward cut.")]
         planner_notes = [
             "Planner uses subtitle windows scored for intrigue and dialogue density.",
             "Display order may differ from chronology to improve hook strength.",
         ]
 
-    while clips and clips[-1].output_end_ms > max_duration_seconds * 1000:
-        clips.pop()
-        beats.pop()
-
-    if not clips:
+    variants = _build_story_variants(
+        selected_candidates,
+        target_duration_ms=target_duration_ms,
+        total_runtime_ms=total_runtime_ms,
+        max_duration_seconds=max_duration_seconds,
+        chronological=longform_mode,
+    )
+    if not variants:
         raise RuntimeError("Story planner could not fit any clips within the requested duration.")
 
+    primary_variant = variants[0]
     manifest = JobManifest(
         job_id=0,
         filename="",
@@ -475,12 +508,17 @@ def choose_story_beats(
         subtitle_source="",
         subtitle_path="",
         total_runtime_seconds=round(total_runtime_seconds, 2),
-        beats=beats,
-        clips=clips,
+        beats=primary_variant.beats,
+        clips=primary_variant.clips,
+        variants=variants,
         planner_notes=planner_notes,
     )
     if any(window.script_score > 0 for window in windows):
         manifest.planner_notes.append("Planner re-scored subtitle windows using screenplay or transcript overlap from fetched script context.")
+    if len(variants) > 1:
+        manifest.planner_notes.append(f"Planner generated {len(variants)} distinct cut variants for review.")
+    if not target_duration_seconds:
+        manifest.planner_notes.append(f"Planner inferred a contextual duration target of {round(target_duration_ms / 1000)} seconds.")
     return manifest
 
 
@@ -516,11 +554,17 @@ def _select_longform_windows(ordered: list[SubtitleWindow], target_duration_ms: 
 
 
 def _select_contiguous_story_arc(ordered: list[SubtitleWindow], target_duration_ms: int) -> list[SubtitleWindow]:
+    candidates = _rank_contiguous_story_arcs(ordered, target_duration_ms)
+    return candidates[0].windows if candidates else []
+
+
+def _rank_contiguous_story_arcs(ordered: list[SubtitleWindow], target_duration_ms: int) -> list[VariantCandidate]:
     if not ordered:
         return []
 
-    best_slice = (0, min(len(ordered), max(1, round(target_duration_ms / 18_000))))
-    best_score = float("-inf")
+    candidates: list[VariantCandidate] = []
+    max_possible_span_ms = ordered[-1].end_ms - ordered[0].start_ms
+    minimum_span_ms = min(int(target_duration_ms * 0.65), max_possible_span_ms)
     for start_index in range(len(ordered)):
         span_end = start_index
         while span_end < len(ordered) and ordered[span_end].end_ms - ordered[start_index].start_ms < target_duration_ms * 1.1:
@@ -528,7 +572,7 @@ def _select_contiguous_story_arc(ordered: list[SubtitleWindow], target_duration_
         for end_index in range(start_index + 1, span_end + 1):
             window_slice = ordered[start_index:end_index]
             span_ms = window_slice[-1].end_ms - window_slice[0].start_ms
-            if span_ms < target_duration_ms * 0.65:
+            if span_ms < minimum_span_ms:
                 continue
             average_score = sum(window.score for window in window_slice) / len(window_slice)
             continuity = sum(_continuity_bonus(window_slice[i], window_slice[i + 1]) for i in range(len(window_slice) - 1))
@@ -559,10 +603,26 @@ def _select_contiguous_story_arc(ordered: list[SubtitleWindow], target_duration_
                 - duration_penalty
                 - large_gap_penalty
             )
-            if score > best_score:
-                best_score = score
-                best_slice = (start_index, end_index)
-    start_index, end_index = best_slice
+            start_scene = window_slice[0].screenplay_scene or _window_summary(window_slice[0].text, limit=8)
+            end_scene = window_slice[-1].screenplay_scene or _window_summary(window_slice[-1].text, limit=8)
+            candidates.append(
+                VariantCandidate(
+                    windows=_expand_arc_bounds(ordered, start_index, end_index, target_duration_ms),
+                    score=score,
+                    selection_reason=f"Contiguous arc from {start_scene} to {end_scene}.",
+                )
+            )
+
+    candidates.sort(key=lambda item: item.score, reverse=True)
+    return _dedupe_candidate_windows(candidates)
+
+
+def _expand_arc_bounds(
+    ordered: list[SubtitleWindow],
+    start_index: int,
+    end_index: int,
+    target_duration_ms: int,
+) -> list[SubtitleWindow]:
     while start_index > 0 or end_index < len(ordered):
         current = ordered[start_index:end_index]
         span_ms = current[-1].end_ms - current[0].start_ms
@@ -590,6 +650,134 @@ def _select_contiguous_story_arc(ordered: list[SubtitleWindow], target_duration_
             break
 
     return ordered[start_index:end_index]
+
+
+def _build_default_hook_variant(ordered: list[SubtitleWindow]) -> list[SubtitleWindow]:
+    hook = max(ordered, key=lambda item: item.score)
+    context_candidates = [item for item in ordered if item.start_ms < hook.start_ms]
+    context = context_candidates[max(0, math.floor(len(context_candidates) * 0.55))] if context_candidates else ordered[0]
+    escalation_candidates = [item for item in ordered if item.start_ms > context.start_ms and item.start_ms != hook.start_ms]
+    escalation = max(escalation_candidates or ordered, key=lambda item: item.score)
+    payoff_candidates = [item for item in ordered if item.start_ms > escalation.start_ms]
+    payoff = max(payoff_candidates or ordered[-2:], key=lambda item: item.score)
+
+    unique_windows: list[SubtitleWindow] = []
+    for item in (hook, context, escalation, payoff):
+        if all(existing.start_ms != item.start_ms for existing in unique_windows):
+            unique_windows.append(item)
+    return unique_windows
+
+
+def _rank_hook_variants(ordered: list[SubtitleWindow], target_duration_ms: int) -> list[VariantCandidate]:
+    top_hooks = sorted(ordered, key=lambda item: item.score, reverse=True)[: min(8, len(ordered))]
+    candidates: list[VariantCandidate] = []
+    for hook in top_hooks:
+        prior = [item for item in ordered if item.start_ms < hook.start_ms]
+        later = [item for item in ordered if item.start_ms > hook.start_ms]
+        context_pool = prior[-3:] if prior else ordered[:1]
+        escalation_pool = sorted(later, key=lambda item: item.score, reverse=True)[:3] if later else ordered[-2:]
+        payoff_pool = sorted(
+            [item for item in ordered if item.start_ms > (escalation_pool[0].start_ms if escalation_pool else hook.start_ms)],
+            key=lambda item: item.score,
+            reverse=True,
+        )[:3]
+        if not payoff_pool:
+            payoff_pool = ordered[-2:]
+
+        for context in context_pool:
+            for escalation in escalation_pool:
+                for payoff in payoff_pool:
+                    unique_windows: list[SubtitleWindow] = []
+                    for item in (hook, context, escalation, payoff):
+                        if all(existing.start_ms != item.start_ms for existing in unique_windows):
+                            unique_windows.append(item)
+                    if len(unique_windows) < 3:
+                        continue
+                    score = sum(window.score for window in unique_windows)
+                    earliest = min(window.start_ms for window in unique_windows)
+                    latest = max(window.end_ms for window in unique_windows)
+                    duration_penalty = abs((latest - earliest) - target_duration_ms) / max(target_duration_ms, 1) * 2.0
+                    selection_reason = f"Hook-forward cut anchored by {_window_summary(hook.text, limit=10)}."
+                    candidates.append(
+                        VariantCandidate(
+                            windows=unique_windows,
+                            score=score - duration_penalty,
+                            selection_reason=selection_reason,
+                        )
+                    )
+    candidates.sort(key=lambda item: item.score, reverse=True)
+    return _dedupe_candidate_windows(candidates)
+
+
+def _dedupe_candidate_windows(candidates: list[VariantCandidate]) -> list[VariantCandidate]:
+    deduped: list[VariantCandidate] = []
+    seen_keys: set[tuple[tuple[int, int], ...]] = set()
+    for candidate in candidates:
+        key = tuple((window.start_ms, window.end_ms) for window in candidate.windows)
+        if key in seen_keys:
+            continue
+        deduped.append(candidate)
+        seen_keys.add(key)
+    return deduped
+
+
+def _select_diverse_candidates(candidates: list[VariantCandidate], variant_count: int) -> list[VariantCandidate]:
+    if variant_count <= 1:
+        return candidates[:1]
+
+    selected: list[VariantCandidate] = []
+    for candidate in candidates:
+        similarity = max((_candidate_similarity(candidate, prior) for prior in selected), default=0.0)
+        if similarity >= 0.65:
+            continue
+        selected.append(candidate)
+        if len(selected) >= variant_count:
+            return selected
+
+    for candidate in candidates:
+        if len(selected) >= variant_count:
+            break
+        if candidate not in selected:
+            selected.append(candidate)
+    return selected
+
+
+def _candidate_similarity(left: VariantCandidate, right: VariantCandidate) -> float:
+    left_ids = {(window.start_ms, window.end_ms) for window in left.windows}
+    right_ids = {(window.start_ms, window.end_ms) for window in right.windows}
+    if not left_ids or not right_ids:
+        return 0.0
+    intersection = len(left_ids & right_ids)
+    union = len(left_ids | right_ids)
+    return intersection / max(union, 1)
+
+
+def _build_story_variants(
+    candidates: list[VariantCandidate],
+    target_duration_ms: int,
+    total_runtime_ms: int,
+    max_duration_seconds: int | None,
+    chronological: bool,
+) -> list[StoryVariant]:
+    variants: list[StoryVariant] = []
+    for index, candidate in enumerate(candidates, start=1):
+        beats, clips = _build_clips(candidate.windows, target_duration_ms, total_runtime_ms, chronological=chronological)
+        duration_cap_ms = max_duration_seconds * 1000 if max_duration_seconds else None
+        while duration_cap_ms is not None and clips and clips[-1].output_end_ms > duration_cap_ms:
+            clips.pop()
+            beats.pop()
+        if not clips:
+            continue
+        variants.append(
+            StoryVariant(
+                variant_id=index,
+                label=f"Variant {index}",
+                selection_reason=candidate.selection_reason,
+                beats=beats,
+                clips=clips,
+            )
+        )
+    return variants
 
 
 def _build_clips(

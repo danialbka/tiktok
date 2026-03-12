@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from enum import Enum
 
 import typer
 from rich.console import Console
@@ -13,6 +14,13 @@ from .pipeline import Pipeline
 
 app = typer.Typer(help="Generate TikTok-style shorts from Real-Debrid movies.")
 console = Console()
+
+
+class RenderMode(str, Enum):
+    crop = "crop"
+    fit = "fit"
+
+
 AGENT_HELP_TEXT = """\
 Movie Shorts agent usage
 
@@ -31,11 +39,15 @@ Recommended workflow:
    Import downloadable movie files into the local SQLite queue.
 3. movie-shorts jobs --limit 10
    Inspect discovered, planned, completed, or failed jobs.
-4. movie-shorts plan <job_id>
+4. movie-shorts plan <job_id> [--target-duration <seconds>] [--variant-count 5]
    Download the movie if needed, extract or fetch subtitles, enrich script context, and write manifest.json.
-5. movie-shorts render <job_id>
-   Render the final vertical short from an existing manifest.
-6. movie-shorts batch-run --limit 3
+   The planner can generate multiple distinct cut variants for the same movie.
+   If target duration is omitted, the planner infers length from the story context.
+5. movie-shorts render <job_id> --render-mode crop|fit
+   Render the planned cut variants from an existing manifest.
+   crop = centered 9:16 crop.
+   fit = keep the horizontal frame inside 9:16 with a blurred background.
+6. movie-shorts batch-run --limit 3 [--target-duration <seconds>] [--variant-count 5]
    Process multiple discovered jobs automatically.
 7. movie-shorts retry <job_id>
    Reset a failed job back to discovered state.
@@ -46,6 +58,7 @@ Important artifacts:
 - Job artifacts: artifacts/<job_id>/
 - Planning manifest: artifacts/<job_id>/manifest.json
 - Rendered short: artifacts/<job_id>/short.mp4
+- Rendered variants: artifacts/<job_id>/variants/short_01.mp4, short_02.mp4, ...
 
 Agent guidance:
 - Use sync before planning new titles.
@@ -97,21 +110,25 @@ def list_jobs(status: str | None = typer.Option(None, help="Optional job status 
 @app.command()
 def plan(
     job_id: int,
-    target_duration: int | None = typer.Option(None, min=15, max=180, help="Optional target runtime in seconds."),
+    target_duration: int | None = typer.Option(None, min=15, help="Optional target runtime in seconds."),
+    variant_count: int = typer.Option(5, min=1, max=12, help="Number of distinct cut variants to plan."),
 ) -> None:
     pipeline = _pipeline()
     try:
-        manifest_path = pipeline.plan_job(job_id, target_duration_seconds=target_duration)
+        manifest_path = pipeline.plan_job(job_id, target_duration_seconds=target_duration, variant_count=variant_count)
     finally:
         pipeline.close()
     console.print(f"Planned job {job_id}: {manifest_path}")
 
 
 @app.command()
-def render(job_id: int) -> None:
+def render(
+    job_id: int,
+    render_mode: RenderMode = typer.Option(RenderMode.crop, help="Render layout mode: crop or fit."),
+) -> None:
     pipeline = _pipeline()
     try:
-        output_path = pipeline.render_job(job_id)
+        output_path = pipeline.render_job(job_id, render_mode=render_mode.value)
     finally:
         pipeline.close()
     console.print(f"Rendered job {job_id}: {output_path}")
@@ -120,11 +137,18 @@ def render(job_id: int) -> None:
 @app.command("batch-run")
 def batch_run(
     limit: int = typer.Option(3, min=1, max=50, help="Number of discovered jobs to process."),
-    target_duration: int | None = typer.Option(None, min=15, max=180, help="Optional target runtime in seconds."),
+    target_duration: int | None = typer.Option(None, min=15, help="Optional target runtime in seconds."),
+    render_mode: RenderMode = typer.Option(RenderMode.crop, help="Render layout mode: crop or fit."),
+    variant_count: int = typer.Option(5, min=1, max=12, help="Number of distinct cut variants to plan."),
 ) -> None:
     pipeline = _pipeline()
     try:
-        completed = pipeline.batch_run(limit=limit, target_duration_seconds=target_duration)
+        completed = pipeline.batch_run(
+            limit=limit,
+            target_duration_seconds=target_duration,
+            render_mode=render_mode.value,
+            variant_count=variant_count,
+        )
     finally:
         pipeline.close()
     console.print(f"Completed {len(completed)} job(s): {', '.join(str(item) for item in completed) if completed else 'none'}")
