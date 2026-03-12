@@ -1,3 +1,5 @@
+![Movie Shorts banner](./banner.png)
+
 # Movie Shorts
 
 Generate TikTok-style or Shorts-style vertical videos from movies already in your Real-Debrid account.
