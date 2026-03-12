@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Callable
 import json
 import shutil
+import time
 
 from .config import Settings
-from .models import JobManifest
+from .models import AvailableMovie, JobManifest
 from .planner import choose_story_beats
 from .rd import RealDebridClient, TorrentInfo
 from .render import render_short
@@ -28,21 +30,137 @@ class Pipeline:
     def whoami(self) -> dict:
         return self.rd.get_user()
 
-    def sync_downloads(self, limit: int = 100) -> list[int]:
+    def list_available_movies(self, limit: int | None = None) -> list[AvailableMovie]:
+        items = self.rd.list_downloads(limit=limit)
+        available: list[AvailableMovie] = []
+        for item in items:
+            queued = self.store.get_job_by_rd_id(item.id)
+            queued_metadata = json.loads(queued["metadata_json"] or "{}") if queued else {}
+            inferred = self.rd.infer_metadata(item.filename)
+            available.append(
+                AvailableMovie(
+                    source_type="download",
+                    rd_download_id=item.id,
+                    filename=item.filename,
+                    filesize=item.filesize,
+                    download_url=item.download_url,
+                    link_url=item.link,
+                    mime_type=item.mime_type,
+                    generated_at=item.generated_at,
+                    parsed_title=str(queued_metadata.get("parsed_title") or inferred.get("parsed_title") or item.stem),
+                    parsed_year=queued_metadata.get("parsed_year") or inferred.get("parsed_year"),
+                    job_id=int(queued["id"]) if queued else None,
+                    job_status=str(queued["status"]) if queued else None,
+                    output_path=str(queued["output_path"]) if queued and queued["output_path"] else None,
+                    ready=True,
+                    rd_status="downloaded",
+                    rd_progress=100,
+                )
+            )
+        return available
+
+    def list_processing_torrents(self, limit: int | None = None) -> list[TorrentInfo]:
+        torrents = self.rd.list_torrents(limit=limit)
+        return [item for item in torrents if item.status != "downloaded" or item.progress < 100]
+
+    def list_browseable_movies(self, limit: int | None = None) -> list[AvailableMovie]:
+        downloads = self.list_available_movies(limit=limit)
+        existing_links = {item.link_url for item in downloads}
+        browseable = list(downloads)
+        for torrent in self.rd.list_torrents(limit=limit):
+            if torrent.progress >= 100 and torrent.status == "downloaded":
+                continue
+            if any(link in existing_links for link in torrent.links):
+                continue
+            inferred = self.rd.infer_metadata(torrent.filename)
+            browseable.append(
+                AvailableMovie(
+                    source_type="torrent",
+                    rd_download_id=f"torrent:{torrent.id}",
+                    filename=torrent.filename,
+                    filesize=torrent.bytes_total,
+                    download_url="",
+                    link_url=torrent.links[0] if torrent.links else "",
+                    parsed_title=str(inferred.get("parsed_title") or Path(torrent.filename).stem),
+                    parsed_year=inferred.get("parsed_year"),
+                    ready=False,
+                    rd_status=torrent.status,
+                    rd_progress=torrent.progress,
+                    rd_torrent_id=torrent.id,
+                )
+            )
+        return browseable
+
+    def queue_available_movie(self, movie: AvailableMovie) -> int:
+        metadata = self.rd.infer_metadata(movie.filename)
+        return self.store.upsert_download(
+            {
+                "rd_download_id": movie.rd_download_id,
+                "filename": movie.filename,
+                "download_url": movie.download_url,
+                "link_url": movie.link_url,
+                "filesize": movie.filesize,
+                "mime_type": movie.mime_type,
+                "metadata": metadata | {"generated_at": movie.generated_at},
+            }
+        )
+
+    def queue_torrent_movie(self, torrent: TorrentInfo) -> int:
+        video_link = self.rd.pick_video_link(torrent)
+        if not video_link:
+            raise RuntimeError(f"Torrent {torrent.id} does not expose a downloadable video link yet.")
+        package = self.rd.unrestrict_link(video_link)
+        metadata = self.rd.infer_metadata(package.filename or torrent.filename)
+        return self.store.upsert_download(
+            {
+                "rd_download_id": package.id,
+                "filename": package.filename,
+                "download_url": package.download_url,
+                "link_url": package.link,
+                "filesize": package.filesize,
+                "mime_type": package.mime_type,
+                "metadata": metadata | {"generated_at": package.generated_at, "source_torrent_id": torrent.id},
+            }
+        )
+
+    def wait_and_queue_torrent_movie(
+        self,
+        torrent_id: str,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+        timeout_seconds: float = 3600.0,
+        poll_interval_seconds: float = 5.0,
+    ) -> int:
+        deadline = time.time() + timeout_seconds
+        last_info: TorrentInfo | None = None
+        while time.time() < deadline:
+            info = self.rd.get_torrent_info(torrent_id)
+            last_info = info
+            if progress_callback is not None:
+                progress_callback(info.status, int(info.progress or 0), 100)
+            if info.status == "downloaded" and info.progress >= 100:
+                return self.queue_torrent_movie(info)
+            if info.status in {"error", "virus", "dead"}:
+                raise RuntimeError(f"Torrent {torrent_id} failed with status {info.status}.")
+            time.sleep(poll_interval_seconds)
+        raise RuntimeError(
+            f"Timed out waiting for torrent {torrent_id} to finish. Last status: {last_info.status if last_info else 'unknown'}"
+        )
+
+    def sync_downloads(self, limit: int | None = None) -> list[int]:
         items = self.rd.list_downloads(limit=limit)
         synced: list[int] = []
         for item in items:
-            metadata = self.rd.infer_metadata(item.filename)
-            job_id = self.store.upsert_download(
-                {
-                    "rd_download_id": item.id,
-                    "filename": item.filename,
-                    "download_url": item.download_url,
-                    "link_url": item.link,
-                    "filesize": item.filesize,
-                    "mime_type": item.mime_type,
-                    "metadata": metadata | {"generated_at": item.generated_at},
-                }
+            job_id = self.queue_available_movie(
+                AvailableMovie(
+                    source_type="download",
+                    rd_download_id=item.id,
+                    filename=item.filename,
+                    filesize=item.filesize,
+                    download_url=item.download_url,
+                    link_url=item.link,
+                    mime_type=item.mime_type,
+                    generated_at=item.generated_at,
+                )
             )
             synced.append(job_id)
         return synced
@@ -67,11 +185,23 @@ class Pipeline:
             completed.append(job_id)
         return completed
 
-    def plan_job(self, job_id: int, target_duration_seconds: int | None = None, variant_count: int = 5) -> Path:
+    def plan_job(
+        self,
+        job_id: int,
+        target_duration_seconds: int | None = None,
+        variant_count: int = 5,
+        stage_callback: Callable[[str, int, int], None] | None = None,
+        download_progress_callback: Callable[[int, int | None], None] | None = None,
+    ) -> Path:
         row = self.store.get_job(job_id)
         job_dir = self.settings.artifact_dir / str(job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
-        local_video_path = Path(row["local_video_path"]) if row["local_video_path"] else self._ensure_video(job_id)
+        self._emit_stage(stage_callback, "Preparing source video", 0, 6)
+        if row["local_video_path"]:
+            local_video_path = Path(row["local_video_path"])
+        else:
+            local_video_path = self._ensure_video(job_id, download_progress_callback=download_progress_callback)
+        self._emit_stage(stage_callback, "Fetching script context", 1, 6)
         metadata = json.loads(row["metadata_json"] or "{}")
         script_context = []
         script_context_error: str | None = None
@@ -89,6 +219,7 @@ class Pipeline:
             rd_sidecar_subtitle_path = self._fetch_rd_sidecar_subtitle(row, job_dir)
         except Exception as exc:
             script_context_error = script_context_error or f"RD sidecar subtitle recovery skipped: {exc}"
+        self._emit_stage(stage_callback, "Resolving subtitles", 2, 6)
         subtitle_path, subtitle_source = fetch_subtitles(
             local_video_path,
             job_dir / "subtitles.srt",
@@ -98,7 +229,9 @@ class Pipeline:
             query_year=metadata.get("parsed_year"),
             rd_sidecar_subtitle_path=rd_sidecar_subtitle_path,
         )
+        self._emit_stage(stage_callback, "Loading subtitle cues", 3, 6)
         cues = load_cues(subtitle_path)
+        self._emit_stage(stage_callback, "Choosing story beats", 4, 6)
         manifest = choose_story_beats(
             cues,
             self.settings.max_duration_seconds,
@@ -122,6 +255,7 @@ class Pipeline:
             manifest.planner_notes.append(f"Requested target duration: {target_duration_seconds} seconds.")
         manifest.planner_notes.append(f"Requested variant count: {variant_count}.")
 
+        self._emit_stage(stage_callback, "Writing manifest", 5, 6)
         manifest_path = job_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
         self.store.update_job(
@@ -133,13 +267,20 @@ class Pipeline:
             last_error=None,
         )
         self.store.add_event(job_id, "planned", {"manifest_path": str(manifest_path)})
+        self._emit_stage(stage_callback, "Planning complete", 6, 6)
         return manifest_path
 
-    def render_job(self, job_id: int, render_mode: str = "crop") -> Path:
+    def render_job(
+        self,
+        job_id: int,
+        render_mode: str = "crop",
+        stage_callback: Callable[[str, int, int], None] | None = None,
+    ) -> Path:
         row = self.store.get_job(job_id)
         if row["status"] not in {"planned", "rendering", "completed"}:
             raise RuntimeError(f"Job {job_id} is not planned yet.")
         manifest_path = Path(row["manifest_path"])
+        self._emit_stage(stage_callback, "Loading render manifest", 0, 1)
         manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest = self._manifest_from_dict(manifest_data)
         source_video = Path(row["local_video_path"])
@@ -165,8 +306,16 @@ class Pipeline:
             ]
             manifest.variants = variant_manifests
 
+        render_total = len(variant_manifests) + 2
+        self._emit_stage(stage_callback, "Preparing render outputs", 1, render_total)
         rendered_outputs: list[Path] = []
         for variant in variant_manifests:
+            self._emit_stage(
+                stage_callback,
+                f"Rendering variant {variant.variant_id}/{len(variant_manifests)}",
+                variant.variant_id,
+                render_total,
+            )
             variant_output = variants_dir / f"short_{variant.variant_id:02d}.mp4"
             variant_work_dir = work_dir / f"variant_{variant.variant_id:02d}"
             variant_manifest = JobManifest(
@@ -196,7 +345,11 @@ class Pipeline:
         if not rendered_outputs:
             raise RuntimeError(f"Job {job_id} has no renderable variants.")
 
+        self._emit_stage(stage_callback, "Finalizing rendered outputs", len(variant_manifests) + 1, render_total)
         shutil.copy2(rendered_outputs[0], output_path)
+        primary_sidecar = rendered_outputs[0].with_suffix(".srt")
+        if primary_sidecar.exists():
+            shutil.copy2(primary_sidecar, output_path.with_suffix(".srt"))
         rendered = output_path
         manifest.beats = manifest.variants[0].beats
         manifest.clips = manifest.variants[0].clips
@@ -212,6 +365,7 @@ class Pipeline:
                 "render_mode": render_mode,
             },
         )
+        self._emit_stage(stage_callback, "Rendering complete", render_total, render_total)
         return rendered
 
     @staticmethod
@@ -237,16 +391,34 @@ class Pipeline:
         )
         self.store.add_event(job_id, "retried", {})
 
-    def _ensure_video(self, job_id: int) -> Path:
+    def _ensure_video(
+        self,
+        job_id: int,
+        download_progress_callback: Callable[[int, int | None], None] | None = None,
+    ) -> Path:
         row = self.store.get_job(job_id)
         target = self.settings.download_dir / f"{job_id}_{Path(row['filename']).name}"
         if target.exists() and target.stat().st_size > 0:
             return target
         self.store.update_job(job_id, status="downloading")
-        downloaded = self.rd.download_file(row["download_url"], target)
+        downloaded = self.rd.download_file(
+            row["download_url"],
+            target,
+            progress_callback=download_progress_callback,
+        )
         self.store.update_job(job_id, local_video_path=str(downloaded), status="downloaded")
         self.store.add_event(job_id, "downloaded", {"local_video_path": str(downloaded)})
         return downloaded
+
+    @staticmethod
+    def _emit_stage(
+        callback: Callable[[str, int, int], None] | None,
+        description: str,
+        completed: int,
+        total: int,
+    ) -> None:
+        if callback is not None:
+            callback(description, completed, total)
 
     def _mark_failed(self, job_id: int, exc: Exception) -> None:
         self.store.update_job(job_id, status="failed", last_error=str(exc))

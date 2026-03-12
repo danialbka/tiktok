@@ -98,6 +98,10 @@ class JobStore:
             if should_close:
                 conn.close()
 
+    def get_job_by_rd_id(self, rd_download_id: str) -> sqlite3.Row | None:
+        with self._connect() as connection:
+            return connection.execute("SELECT * FROM jobs WHERE rd_download_id = ?", (rd_download_id,)).fetchone()
+
     def add_event(
         self,
         job_id: int,
@@ -145,4 +149,3 @@ class JobStore:
         if not row:
             raise KeyError(f"Unknown job {job_id}")
         return row
-

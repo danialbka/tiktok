@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 import re
 import time
 from urllib.parse import quote
@@ -68,8 +69,12 @@ class TorrentInfo:
     original_filename: str
     hash: str
     status: str
+    bytes_total: int
+    progress: int
     links: list[str]
     files: list[TorrentFile]
+    added_at: str | None = None
+    ended_at: str | None = None
 
     @property
     def selected_files(self) -> list[TorrentFile]:
@@ -81,6 +86,14 @@ class TorrentInfo:
             if Path(item.path).suffix.lower() in {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".webm"}:
                 return item
         return None
+
+    @property
+    def selected_video_files(self) -> list[TorrentFile]:
+        return [
+            item
+            for item in self.selected_files
+            if Path(item.path).suffix.lower() in {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".webm"}
+        ]
 
 
 class RealDebridClient:
@@ -101,7 +114,21 @@ class RealDebridClient:
         response.raise_for_status()
         return response.json()
 
-    def list_downloads(self, limit: int = 100, page: int = 1) -> list[DownloadItem]:
+    def list_downloads(self, limit: int | None = 100, page: int = 1) -> list[DownloadItem]:
+        if limit is None:
+            items: list[DownloadItem] = []
+            current_page = page
+            page_size = 100
+            while True:
+                batch = self.list_downloads(limit=page_size, page=current_page)
+                if not batch:
+                    break
+                items.extend(batch)
+                if len(batch) < page_size:
+                    break
+                current_page += 1
+            return items
+
         response = self._client.get("/downloads", params={"limit": limit, "page": page})
         response.raise_for_status()
         items: list[DownloadItem] = []
@@ -119,16 +146,40 @@ class RealDebridClient:
                 items.append(item)
         return items
 
-    def download_file(self, url: str, destination: Path) -> Path:
+    def download_file(
+        self,
+        url: str,
+        destination: Path,
+        progress_callback: Callable[[int, int | None], None] | None = None,
+    ) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with self._client.stream("GET", url, follow_redirects=True) as response:
             response.raise_for_status()
+            total_bytes = int(response.headers.get("Content-Length") or 0) or None
+            downloaded_bytes = 0
             with destination.open("wb") as handle:
                 for chunk in response.iter_bytes():
                     handle.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if progress_callback is not None:
+                        progress_callback(downloaded_bytes, total_bytes)
         return destination
 
-    def list_torrents(self, limit: int = 100, page: int = 1) -> list[TorrentInfo]:
+    def list_torrents(self, limit: int | None = 100, page: int = 1) -> list[TorrentInfo]:
+        if limit is None:
+            items: list[TorrentInfo] = []
+            current_page = page
+            page_size = 100
+            while True:
+                batch = self.list_torrents(limit=page_size, page=current_page)
+                if not batch:
+                    break
+                items.extend(batch)
+                if len(batch) < page_size:
+                    break
+                current_page += 1
+            return items
+
         response = self._client.get("/torrents", params={"limit": limit, "page": page})
         response.raise_for_status()
         return [self._torrent_from_payload(payload) for payload in response.json()]
@@ -189,6 +240,30 @@ class RealDebridClient:
         return f"magnet:?xt=urn:btih:{torrent.hash}&dn={quote(torrent.filename)}"
 
     @staticmethod
+    def pick_video_link(torrent: TorrentInfo) -> str | None:
+        if not torrent.links:
+            return None
+        if len(torrent.links) == 1:
+            return torrent.links[0]
+
+        selected_videos = torrent.selected_video_files
+        if len(selected_videos) == 1:
+            selected_files = torrent.selected_files
+            target_id = selected_videos[0].id
+            for index, item in enumerate(selected_files):
+                if item.id == target_id and index < len(torrent.links):
+                    return torrent.links[index]
+
+        primary_video = torrent.primary_video_file
+        if primary_video:
+            selected_files = torrent.selected_files
+            for index, item in enumerate(selected_files):
+                if item.id == primary_video.id and index < len(torrent.links):
+                    return torrent.links[index]
+
+        return torrent.links[0]
+
+    @staticmethod
     def infer_metadata(filename: str) -> dict[str, str | int | None]:
         stem = Path(filename).stem
         tokens = [token for token in re.split(r"[\s._()\-\[\]]+", stem) if token]
@@ -225,6 +300,8 @@ class RealDebridClient:
             original_filename=payload.get("original_filename") or payload.get("filename") or "unknown",
             hash=payload.get("hash") or "",
             status=payload.get("status") or "unknown",
+            bytes_total=int(payload.get("bytes") or 0),
+            progress=int(payload.get("progress") or 0),
             links=list(payload.get("links") or []),
             files=[
                 TorrentFile(
@@ -235,4 +312,6 @@ class RealDebridClient:
                 )
                 for item in payload.get("files") or []
             ],
+            added_at=payload.get("added"),
+            ended_at=payload.get("ended"),
         )

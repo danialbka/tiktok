@@ -38,6 +38,27 @@ class DownloadItem:
 
 
 @dataclass(slots=True)
+class AvailableMovie:
+    source_type: str
+    rd_download_id: str
+    filename: str
+    filesize: int
+    download_url: str
+    link_url: str
+    mime_type: str | None = None
+    generated_at: str | None = None
+    parsed_title: str | None = None
+    parsed_year: int | None = None
+    job_id: int | None = None
+    job_status: str | None = None
+    output_path: str | None = None
+    ready: bool = True
+    rd_status: str | None = None
+    rd_progress: int | None = None
+    rd_torrent_id: str | None = None
+
+
+@dataclass(slots=True)
 class SubtitleCue:
     index: int
     start_ms: int

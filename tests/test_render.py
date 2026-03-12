@@ -6,6 +6,25 @@ from movie_shorts.render import _video_filter_args, render_short
 from movie_shorts.models import SubtitleCue
 
 
+def _probe_duration_seconds(path: Path) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return float(result.stdout.strip())
+
+
 def test_render_short_creates_vertical_video(tmp_path: Path) -> None:
     video_path = tmp_path / "sample.mp4"
     subprocess.run(
@@ -53,6 +72,9 @@ def test_render_short_creates_vertical_video(tmp_path: Path) -> None:
 
     assert output_path.exists()
     assert output_path.stat().st_size > 0
+    assert output_path.with_suffix(".srt").exists()
+    expected_duration = manifest.clips[-1].output_end_ms / 1000
+    assert _probe_duration_seconds(output_path) <= expected_duration + 1.0
 
 
 def test_render_short_supports_fit_mode(tmp_path: Path) -> None:
@@ -101,6 +123,9 @@ def test_render_short_supports_fit_mode(tmp_path: Path) -> None:
 
     assert output_path.exists()
     assert output_path.stat().st_size > 0
+    assert output_path.with_suffix(".srt").exists()
+    expected_duration = manifest.clips[-1].output_end_ms / 1000
+    assert _probe_duration_seconds(output_path) <= expected_duration + 1.0
 
 
 def test_render_short_supports_fit_43_mode(tmp_path: Path) -> None:
@@ -149,6 +174,9 @@ def test_render_short_supports_fit_43_mode(tmp_path: Path) -> None:
 
     assert output_path.exists()
     assert output_path.stat().st_size > 0
+    assert output_path.with_suffix(".srt").exists()
+    expected_duration = manifest.clips[-1].output_end_ms / 1000
+    assert _probe_duration_seconds(output_path) <= expected_duration + 1.0
 
 
 def test_video_filter_args_supports_crop_fit_and_fit_43() -> None:

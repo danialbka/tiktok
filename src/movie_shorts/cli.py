@@ -8,11 +8,13 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from .config import Settings
 from .instagram import InstagramPublisher
 from .pipeline import Pipeline
+from .rd import RealDebridClient
 
 
 app = typer.Typer(help="Generate TikTok-style shorts from Real-Debrid movies.")
@@ -40,26 +42,30 @@ Expected setup:
 Recommended workflow:
 1. movie-shorts whoami
    Verify Real-Debrid credentials.
-2. movie-shorts sync --limit 10
+2. movie-shorts available-movies
+   List all Real-Debrid movies, including ready downloads and torrents still processing.
+3. movie-shorts sync --limit 10
    Import downloadable movie files into the local SQLite queue.
-3. movie-shorts jobs --limit 10
+4. movie-shorts jobs --limit 10
    Inspect discovered, planned, completed, or failed jobs.
-4. movie-shorts plan <job_id> [--target-duration <seconds>] [--variant-count 5]
+5. movie-shorts plan <job_id> [--target-duration <seconds>] [--variant-count 5]
    Download the movie if needed, extract or fetch subtitles, enrich script context, and write manifest.json.
    The planner can generate multiple distinct cut variants for the same movie.
    If target duration is omitted, the planner infers length from the story context.
-5. movie-shorts render <job_id> --render-mode crop|fit|fit-43
+6. movie-shorts render <job_id> --render-mode crop|fit|fit-43
    Render the planned cut variants from an existing manifest.
    crop = centered 9:16 crop.
    fit = keep the horizontal frame inside 9:16 with a blurred background.
    fit-43 = use a larger 4:3 movie window inside 9:16 with a blurred background.
-6. movie-shorts batch-run --limit 3 [--target-duration <seconds>] [--variant-count 5]
+7. movie-shorts run-movie
+   Interactive preset runner: choose any Real-Debrid movie, wait on non-ready torrents if needed, then watch local download and processing progress in one command.
+8. movie-shorts batch-run --limit 3 [--target-duration <seconds>] [--variant-count 5]
    Process multiple discovered jobs automatically.
-7. movie-shorts retry <job_id>
+9. movie-shorts retry <job_id>
    Reset a failed job back to discovered state.
-8. movie-shorts instagram auth-help
+10. movie-shorts instagram auth-help
    Show the Meta setup and scopes needed for Reels publishing.
-9. movie-shorts instagram publish-job <job_id> --variant 1 --caption "..."
+11. movie-shorts instagram publish-job <job_id> --variant 1 --caption "..."
    Publish a rendered local artifact to Instagram Reels.
 
 Important artifacts:
@@ -99,6 +105,206 @@ def _instagram_publisher() -> InstagramPublisher:
     )
 
 
+def _print_jobs_table(rows: list) -> None:
+    table = Table("ID", "Status", "Filename", "Output")
+    for row in rows:
+        table.add_row(str(row["id"]), row["status"], row["filename"], row["output_path"] or "-")
+    console.print(table)
+
+
+def _format_bytes(size: int | None) -> str:
+    if not size:
+        return "-"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024
+        unit_index += 1
+    return f"{value:.1f}{units[unit_index]}"
+
+
+def _progress_bar(percent: int | None, width: int = 12) -> str:
+    safe_percent = max(0, min(100, int(percent or 0)))
+    filled = round((safe_percent / 100) * width)
+    return f"{'█' * filled}{'░' * (width - filled)} {safe_percent:>3d}%"
+
+
+def _print_available_movies_table(rows: list) -> None:
+    table = Table("#", "Source", "Queue", "RD Status", "Title", "File", "Size")
+    for index, row in enumerate(rows, start=1):
+        title = row.parsed_title or Path(row.filename).stem
+        if row.parsed_year:
+            title = f"{title} ({row.parsed_year})"
+        table.add_row(
+            str(index),
+            row.source_type,
+            str(row.job_id) if row.job_id is not None else "-",
+            row.job_status or row.rd_status or ("ready" if row.ready else "pending"),
+            title,
+            row.filename,
+            _format_bytes(row.filesize),
+        )
+    console.print(table)
+
+
+def _print_processing_torrents_table(rows: list) -> None:
+    if not rows:
+        return
+    table = Table("Torrent", "Status", "Progress", "Title", "Size")
+    for row in rows:
+        metadata = _infer_title_from_filename(row.filename)
+        table.add_row(
+            row.id,
+            row.status,
+            _progress_bar(row.progress),
+            metadata,
+            _format_bytes(row.bytes_total),
+        )
+    console.print(table)
+
+
+def _infer_title_from_filename(filename: str) -> str:
+    inferred = RealDebridClient.infer_metadata(filename)
+    title = str(inferred.get("parsed_title") or Path(filename).stem)
+    year = inferred.get("parsed_year")
+    if year:
+        return f"{title} ({year})"
+    return title
+
+
+def _prompt_available_movie(pipeline: Pipeline, status: str | None, limit: int):
+    rows = pipeline.list_browseable_movies(limit=limit)
+    if status:
+        filtered = [row for row in rows if row.job_status == status or row.rd_status == status]
+        if filtered:
+            rows = filtered
+        else:
+            console.print(f"No movies found with status '{status}'. Showing the full Real-Debrid list instead.")
+
+    if rows:
+        console.print("[bold]Real-Debrid Movies[/bold]")
+        _print_available_movies_table(rows)
+
+    if not rows:
+        raise RuntimeError("No available movies were found in Real-Debrid.")
+
+    valid_indexes = {index: row for index, row in enumerate(rows, start=1)}
+    selected = int(typer.prompt("Movie number to run", default="1"))
+    if selected not in valid_indexes:
+        raise typer.BadParameter(f"Movie number {selected} is not in the current selection list.")
+    return valid_indexes[selected]
+
+
+def _prompt_render_mode() -> RenderMode:
+    console.print("Render modes: crop, fit, fit-43")
+    selected = typer.prompt("Render mode", default=RenderMode.fit_43.value).strip().lower()
+    try:
+        return RenderMode(selected)
+    except ValueError as exc:
+        raise typer.BadParameter(f"Unsupported render mode: {selected}") from exc
+
+
+def _prompt_optional_target_duration() -> int | None:
+    raw_value = typer.prompt("Target duration in seconds (blank for auto)", default="", show_default=False).strip()
+    if not raw_value:
+        return None
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise typer.BadParameter(f"Target duration must be an integer number of seconds, got: {raw_value}") from exc
+    if value < 15:
+        raise typer.BadParameter("Target duration must be at least 15 seconds.")
+    return value
+
+
+def _run_movie_with_progress(
+    pipeline: Pipeline,
+    job_id: int,
+    target_duration: int | None,
+    render_mode: RenderMode,
+    variant_count: int,
+) -> tuple[Path, Path]:
+    row = pipeline.store.get_job(job_id)
+    fallback_download_total = int(row["filesize"] or 0) or None
+    download_task_id: int | None = None
+    process_task_id: int | None = None
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=32),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    )
+
+    with progress:
+        process_task_id = progress.add_task("Preparing movie", total=1)
+
+        def stage_callback(description: str, completed: int, total: int) -> None:
+            progress.update(process_task_id, description=description, completed=completed, total=max(total, 1))
+
+        def download_callback(downloaded_bytes: int, total_bytes: int | None) -> None:
+            nonlocal download_task_id
+            effective_total = total_bytes or fallback_download_total or max(downloaded_bytes, 1)
+            if download_task_id is None:
+                download_task_id = progress.add_task("Downloading source video", total=effective_total)
+            progress.update(download_task_id, completed=downloaded_bytes, total=effective_total)
+
+        manifest_path = pipeline.plan_job(
+            job_id,
+            target_duration_seconds=target_duration,
+            variant_count=variant_count,
+            stage_callback=stage_callback,
+            download_progress_callback=download_callback,
+        )
+        output_path = pipeline.render_job(
+            job_id,
+            render_mode=render_mode.value,
+            stage_callback=stage_callback,
+        )
+
+        if download_task_id is not None:
+            total = progress.tasks[download_task_id].total or progress.tasks[download_task_id].completed
+            progress.update(download_task_id, completed=total)
+        total = progress.tasks[process_task_id].total or progress.tasks[process_task_id].completed
+        progress.update(process_task_id, description="Completed", completed=total)
+
+    return manifest_path, output_path
+
+
+def _queue_selected_movie_with_progress(pipeline: Pipeline, selected_movie) -> int:
+    if selected_movie.ready:
+        return selected_movie.job_id or pipeline.queue_available_movie(selected_movie)
+
+    if not selected_movie.rd_torrent_id:
+        raise RuntimeError(f"Movie '{selected_movie.filename}' is not ready and has no Real-Debrid torrent id.")
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=32),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    )
+    with progress:
+        task_id = progress.add_task("Waiting for Real-Debrid torrent", total=100)
+
+        def remote_callback(status: str, completed: int, total: int) -> None:
+            progress.update(task_id, description=f"Waiting for Real-Debrid torrent ({status})", completed=completed, total=max(total, 1))
+
+        job_id = pipeline.wait_and_queue_torrent_movie(
+            selected_movie.rd_torrent_id,
+            progress_callback=remote_callback,
+        )
+        progress.update(task_id, description="Real-Debrid source ready", completed=100, total=100)
+    return job_id
+
+
 @app.command()
 def whoami() -> None:
     pipeline = _pipeline()
@@ -119,6 +325,21 @@ def sync(limit: int = typer.Option(25, min=1, max=200, help="Maximum Real-Debrid
     console.print(f"Synced {len(job_ids)} video download(s) into the local queue.")
 
 
+@app.command("available-movies")
+def available_movies(limit: int | None = typer.Option(None, min=1, help="Optional maximum Real-Debrid items to inspect. Default: all.")) -> None:
+    pipeline = _pipeline()
+    try:
+        rows = pipeline.list_browseable_movies(limit=limit)
+    finally:
+        pipeline.close()
+
+    if rows:
+        console.print("[bold]Real-Debrid Movies[/bold]")
+        _print_available_movies_table(rows)
+    else:
+        console.print("No movies found in Real-Debrid.")
+
+
 @app.command("jobs")
 def list_jobs(status: str | None = typer.Option(None, help="Optional job status filter."), limit: int = 20) -> None:
     settings = Settings.load()
@@ -127,10 +348,7 @@ def list_jobs(status: str | None = typer.Option(None, help="Optional job status 
         rows = pipeline.store.list_jobs(status=status, limit=limit)
     finally:
         pipeline.close()
-    table = Table("ID", "Status", "Filename", "Output")
-    for row in rows:
-        table.add_row(str(row["id"]), row["status"], row["filename"], row["output_path"] or "-")
-    console.print(table)
+    _print_jobs_table(rows)
 
 
 @app.command()
@@ -158,6 +376,43 @@ def render(
     finally:
         pipeline.close()
     console.print(f"Rendered job {job_id}: {output_path}")
+
+
+@app.command("run-movie")
+def run_movie(
+    job_id: int | None = typer.Argument(None, help="Optional job ID. If omitted, choose from a prompt."),
+    sync_first: bool = typer.Option(False, help="Sync all ready Real-Debrid movies into the queue before selection."),
+    status: str | None = typer.Option(None, help="Optional queue status filter when choosing a movie interactively."),
+    limit: int | None = typer.Option(None, min=1, help="Optional maximum number of Real-Debrid movies to show. Default: all."),
+    target_duration: int | None = typer.Option(None, min=15, help="Optional target runtime in seconds."),
+    render_mode: RenderMode | None = typer.Option(None, help="Render layout mode. If omitted, choose interactively."),
+    variant_count: int = typer.Option(5, min=1, max=12, help="Number of distinct cut variants to plan."),
+) -> None:
+    pipeline = _pipeline()
+    try:
+        if sync_first:
+            synced = pipeline.sync_downloads(limit=limit)
+            console.print(f"Synced {len(synced)} video download(s) before selection.")
+
+        if job_id is not None:
+            selected_job_id = job_id
+        else:
+            selected_movie = _prompt_available_movie(pipeline, status=status, limit=limit)
+            selected_job_id = _queue_selected_movie_with_progress(pipeline, selected_movie)
+        selected_render_mode = render_mode or _prompt_render_mode()
+        selected_target_duration = target_duration if target_duration is not None else _prompt_optional_target_duration()
+        manifest_path, output_path = _run_movie_with_progress(
+            pipeline,
+            selected_job_id,
+            selected_target_duration,
+            selected_render_mode,
+            variant_count,
+        )
+    finally:
+        pipeline.close()
+
+    console.print(f"Planned job {selected_job_id}: {manifest_path}")
+    console.print(f"Rendered job {selected_job_id}: {output_path}")
 
 
 @app.command("batch-run")

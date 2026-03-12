@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import shutil
 
 from .models import JobManifest, SubtitleCue
 
@@ -63,10 +64,14 @@ def render_short(
             "-y",
             "-ss",
             f"{clip.source_start_ms / 1000:.3f}",
-            "-t",
-            f"{duration_seconds:.3f}",
             "-i",
             str(source_video),
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
             filter_flag,
             filter_value,
             "-af",
@@ -87,7 +92,7 @@ def render_short(
         parts.append(part_path)
 
     concat_path = write_concat_file(parts, work_dir / "concat.txt")
-    stitched_path = work_dir / "stitched.mp4"
+    stitched_raw_path = work_dir / "stitched_raw.mp4"
     _run(
         [
             "ffmpeg",
@@ -100,17 +105,18 @@ def render_short(
             str(concat_path),
             "-c",
             "copy",
-            str(stitched_path),
+            str(stitched_raw_path),
         ]
     )
 
     subtitle_path = write_remapped_srt(manifest, cues, work_dir / "burned.srt")
+    stitched_path = work_dir / "stitched.mp4"
     _run(
         [
             "ffmpeg",
             "-y",
             "-i",
-            str(stitched_path),
+            str(stitched_raw_path),
             "-vf",
             f"subtitles={subtitle_path.as_posix()}:force_style='{CAPTION_STYLE}'",
             "-c:v",
@@ -123,9 +129,11 @@ def render_short(
             "copy",
             "-movflags",
             "+faststart",
-            str(output_path),
+            str(stitched_path),
         ]
     )
+    shutil.copy2(stitched_path, output_path)
+    shutil.copy2(subtitle_path, output_path.with_suffix(".srt"))
     return output_path
 
 

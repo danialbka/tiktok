@@ -4,6 +4,14 @@ Generate TikTok-style or Shorts-style vertical videos from movies already in you
 
 The pipeline downloads a source movie from Real-Debrid, finds subtitles, builds a story arc from timed dialogue, enriches planning with screenplay or transcript context when available, and renders a 9:16 captioned export.
 
+## For Agents
+
+If you are using Codex or another agent to operate this repo:
+
+- read this `README.md` first before making workflow decisions
+- prefer the built-in CLI and existing presets before adding new code
+- use `GPT-5.4` in Codex for the best results on planning, debugging, and media workflow tasks
+
 ## What It Does
 
 - Syncs downloadable video files from your Real-Debrid account into a local SQLite job queue.
@@ -77,19 +85,31 @@ Use `.env.example` as the checked-in template. Do not commit live API keys.
 
 ## CLI Workflow
 
-### 1. Sync downloads into the queue
+### 1. Browse all Real-Debrid movies, including in-progress torrents
+
+```bash
+uv run movie-shorts available-movies
+```
+
+That command shows one browseable list with:
+
+- ready movie files already available in Real-Debrid downloads
+- movies that are still processing inside Real-Debrid
+- any matching local queue ID/status if the movie was already synced before
+
+### 2. Sync downloads into the queue
 
 ```bash
 uv run movie-shorts sync --limit 10
 ```
 
-### 2. Inspect queued jobs
+### 3. Inspect queued jobs
 
 ```bash
 uv run movie-shorts jobs --limit 10
 ```
 
-### 3. Plan one movie
+### 4. Plan one movie
 
 ```bash
 uv run movie-shorts plan 18
@@ -107,7 +127,7 @@ Plan 5 different cut options for the same movie:
 uv run movie-shorts plan 18 --target-duration 120 --variant-count 5
 ```
 
-### 4. Render the short(s)
+### 5. Render the short(s)
 
 ```bash
 uv run movie-shorts render 18
@@ -125,13 +145,39 @@ Render with a larger 4:3 movie window inside 9:16, similar to some Instagram mov
 uv run movie-shorts render 18 --render-mode fit-43
 ```
 
-### 5. Run a small batch
+### 6. Use the interactive movie runner
+
+If you do not want to remember multiple commands, use the built-in runner:
+
+```bash
+uv run movie-shorts run-movie
+```
+
+That command can:
+
+- show all Real-Debrid movies, including ones still processing
+- let you pick the movie from a numbered menu
+- let you choose `crop`, `fit`, or `fit-43`
+- let you leave duration on auto or set a target
+- wait on a not-ready Real-Debrid torrent and queue it automatically once it finishes
+- show a live bar while the source video downloads locally
+- show live processing progress while plan + render runs
+- queue the movie automatically if it was not already in the local database
+- run plan + render in one step
+
+You can also mix interactive selection with explicit flags:
+
+```bash
+uv run movie-shorts run-movie 18 --render-mode fit-43 --variant-count 5
+```
+
+### 7. Run a small batch
 
 ```bash
 uv run movie-shorts batch-run --limit 3 --target-duration 120 --variant-count 5
 ```
 
-### 6. Retry a failed job
+### 8. Retry a failed job
 
 ```bash
 uv run movie-shorts retry 18
