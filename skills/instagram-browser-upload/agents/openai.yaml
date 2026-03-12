@@ -1,0 +1,4 @@
+interface:
+  display_name: "Instagram Browser Upload"
+  short_description: "Upload Instagram reels through a logged-in browser session"
+  default_prompt: "Use $instagram-browser-upload to publish an Instagram reel through the web UI with Playwright, reusing saved browser state when possible."
