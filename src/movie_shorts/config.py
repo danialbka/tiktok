@@ -12,9 +12,6 @@ class Settings:
     real_debrid_api_key: str
     opensubtitles_api_key: str | None
     openai_api_key: str | None
-    instagram_access_token: str | None
-    instagram_user_id: str | None
-    instagram_graph_api_version: str
     db_path: Path
     download_dir: Path
     artifact_dir: Path
@@ -36,9 +33,6 @@ class Settings:
             real_debrid_api_key=api_key or "",
             opensubtitles_api_key=os.getenv("OPENSUBTITLES_API_KEY"),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
-            instagram_access_token=os.getenv("INSTAGRAM_ACCESS_TOKEN"),
-            instagram_user_id=os.getenv("INSTAGRAM_USER_ID"),
-            instagram_graph_api_version=os.getenv("INSTAGRAM_GRAPH_API_VERSION", "v24.0"),
             db_path=Path(os.getenv("MOVIE_SHORTS_DB_PATH", "data/movie_shorts.db")),
             download_dir=Path(os.getenv("MOVIE_SHORTS_DOWNLOAD_DIR", ".cache/downloads")),
             artifact_dir=Path(os.getenv("MOVIE_SHORTS_ARTIFACT_DIR", "artifacts")),

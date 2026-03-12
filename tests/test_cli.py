@@ -13,7 +13,7 @@ def test_dash_help_prints_agent_usage(monkeypatch, capsys) -> None:
     assert "movie-shorts available-movies" in captured.out
     assert "movie-shorts run-movie" in captured.out
     assert "movie-shorts render <job_id> --render-mode crop|fit|fit-43" in captured.out
-    assert "movie-shorts instagram publish-job <job_id> --variant 1 --caption" in captured.out
+    assert "skills/instagram-browser-upload/" in captured.out
 
 
 def test_run_movie_prompts_for_missing_inputs(monkeypatch, capsys) -> None:

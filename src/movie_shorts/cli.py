@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 import sys
 from enum import Enum
-from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -12,13 +10,11 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn
 from rich.table import Table
 
 from .config import Settings
-from .instagram import InstagramPublisher
 from .pipeline import Pipeline
 from .rd import RealDebridClient
 
 
 app = typer.Typer(help="Generate TikTok-style shorts from Real-Debrid movies.")
-instagram_app = typer.Typer(help="Publish rendered outputs to Instagram Reels.")
 console = Console()
 
 
@@ -63,10 +59,8 @@ Recommended workflow:
    Process multiple discovered jobs automatically.
 9. movie-shorts retry <job_id>
    Reset a failed job back to discovered state.
-10. movie-shorts instagram auth-help
-   Show the Meta setup and scopes needed for Reels publishing.
-11. movie-shorts instagram publish-job <job_id> --variant 1 --caption "..."
-   Publish a rendered local artifact to Instagram Reels.
+10. For Instagram uploads, use the browser workflow in skills/instagram-browser-upload/
+    This repo now uses Playwright/browser upload instead of API env vars.
 
 Important artifacts:
 - SQLite queue: data/movie_shorts.db
@@ -82,29 +76,11 @@ Agent guidance:
 - Check manifest.json for beats, clip timing, subtitle source, and script_context.
 - If a job fails because embedded subtitles are missing, add OPENSUBTITLES_API_KEY and retry.
 - batch-run continues past per-job failures and records last_error in the queue.
-- Instagram publishing needs INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_USER_ID in .env.local.
 """
 
 
 def _pipeline() -> Pipeline:
     return Pipeline(Settings.load())
-
-
-def _settings_without_rd() -> Settings:
-    return Settings.load(require_real_debrid=False)
-
-
-def _instagram_publisher() -> InstagramPublisher:
-    settings = _settings_without_rd()
-    if not settings.instagram_access_token or not settings.instagram_user_id:
-        raise RuntimeError("INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_USER_ID are required for Instagram commands.")
-    return InstagramPublisher(
-        access_token=settings.instagram_access_token,
-        instagram_user_id=settings.instagram_user_id,
-        graph_api_version=settings.instagram_graph_api_version,
-    )
-
-
 def _print_jobs_table(rows: list) -> None:
     table = Table("ID", "Status", "Filename", "Output")
     for row in rows:
@@ -443,140 +419,6 @@ def retry(job_id: int) -> None:
     finally:
         pipeline.close()
     console.print(f"Job {job_id} reset to discovered.")
-
-
-@instagram_app.command("auth-help")
-def instagram_auth_help() -> None:
-    console.print(
-        """\
-Instagram publishing setup
-
-Expected account setup:
-- Instagram professional account (Business or Creator)
-- The Instagram account must be linked to a Facebook Page
-- A Meta app with Instagram API / Graph API access
-
-Common permissions for content publishing:
-- instagram_business_basic
-- instagram_business_content_publish
-- pages_show_list
-- pages_read_engagement
-
-Local env vars:
-- INSTAGRAM_ACCESS_TOKEN
-- INSTAGRAM_USER_ID
-- INSTAGRAM_GRAPH_API_VERSION (optional, default: v24.0)
-
-Current CLI flow:
-1. Render a local MP4 from this project
-2. Run movie-shorts instagram whoami
-3. Run movie-shorts instagram publish-job <job_id> --variant 1 --caption "..."
-
-Notes:
-- The CLI uses Meta's resumable upload flow for local files.
-- If your app/token setup differs, use the token Meta provides for the linked professional account.
-"""
-    )
-
-
-@instagram_app.command("whoami")
-def instagram_whoami() -> None:
-    publisher = _instagram_publisher()
-    try:
-        account = publisher.get_account()
-    finally:
-        publisher.close()
-    console.print_json(json.dumps(account))
-
-
-@instagram_app.command("publish")
-def instagram_publish(
-    video_path: Path,
-    caption: str = typer.Option("", help="Caption to publish with the Reel."),
-    share_to_feed: bool = typer.Option(True, "--share-to-feed/--reels-only", help="Share the Reel to the main Instagram feed."),
-    thumb_offset_ms: int | None = typer.Option(None, min=0, help="Optional cover frame offset in milliseconds."),
-    timeout_seconds: int = typer.Option(900, min=30, help="Maximum seconds to wait for Meta processing."),
-    poll_interval_seconds: int = typer.Option(10, min=1, help="Polling interval while the Reel processes."),
-) -> None:
-    if not video_path.exists():
-        raise typer.BadParameter(f"Video path does not exist: {video_path}")
-    publisher = _instagram_publisher()
-    try:
-        result = publisher.publish_reel_from_path(
-            video_path=video_path,
-            caption=caption,
-            share_to_feed=share_to_feed,
-            thumb_offset_ms=thumb_offset_ms,
-            timeout_seconds=timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-        )
-    finally:
-        publisher.close()
-    console.print_json(json.dumps(asdict(result)))
-
-
-@instagram_app.command("publish-url")
-def instagram_publish_url(
-    video_url: str,
-    caption: str = typer.Option("", help="Caption to publish with the Reel."),
-    share_to_feed: bool = typer.Option(True, "--share-to-feed/--reels-only", help="Share the Reel to the main Instagram feed."),
-    thumb_offset_ms: int | None = typer.Option(None, min=0, help="Optional cover frame offset in milliseconds."),
-    timeout_seconds: int = typer.Option(900, min=30, help="Maximum seconds to wait for Meta processing."),
-    poll_interval_seconds: int = typer.Option(10, min=1, help="Polling interval while the Reel processes."),
-) -> None:
-    publisher = _instagram_publisher()
-    try:
-        result = publisher.publish_reel_from_url(
-            video_url=video_url,
-            caption=caption,
-            share_to_feed=share_to_feed,
-            thumb_offset_ms=thumb_offset_ms,
-            timeout_seconds=timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-        )
-    finally:
-        publisher.close()
-    console.print_json(json.dumps(asdict(result)))
-
-
-@instagram_app.command("publish-job")
-def instagram_publish_job(
-    job_id: int,
-    caption: str = typer.Option("", help="Caption to publish with the Reel."),
-    variant: int = typer.Option(1, min=1, help="Which rendered variant to publish."),
-    render_mode: RenderMode = typer.Option(RenderMode.crop, help="Which render set to use: crop, fit, or fit-43."),
-    share_to_feed: bool = typer.Option(True, "--share-to-feed/--reels-only", help="Share the Reel to the main Instagram feed."),
-    thumb_offset_ms: int | None = typer.Option(None, min=0, help="Optional cover frame offset in milliseconds."),
-    timeout_seconds: int = typer.Option(900, min=30, help="Maximum seconds to wait for Meta processing."),
-    poll_interval_seconds: int = typer.Option(10, min=1, help="Polling interval while the Reel processes."),
-) -> None:
-    settings = _settings_without_rd()
-    video_path = InstagramPublisher.resolve_rendered_video_path(
-        artifact_dir=settings.artifact_dir,
-        job_id=job_id,
-        variant=variant,
-        render_mode=render_mode.value,
-    )
-    if not video_path.exists():
-        raise typer.BadParameter(f"Rendered output not found: {video_path}")
-    publisher = _instagram_publisher()
-    try:
-        result = publisher.publish_reel_from_path(
-            video_path=video_path,
-            caption=caption,
-            share_to_feed=share_to_feed,
-            thumb_offset_ms=thumb_offset_ms,
-            timeout_seconds=timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-        )
-    finally:
-        publisher.close()
-    console.print_json(json.dumps(asdict(result)))
-
-
-app.add_typer(instagram_app, name="instagram")
-
-
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "-help":
         console.print(AGENT_HELP_TEXT)

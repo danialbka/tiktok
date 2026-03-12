@@ -57,14 +57,6 @@ cp .env.example .env.local
 REAL_DEBRID_API_KEY=your-real-debrid-api-key
 ```
 
-Optional Instagram publishing env vars:
-
-```env
-INSTAGRAM_ACCESS_TOKEN=your-meta-access-token
-INSTAGRAM_USER_ID=your-instagram-professional-user-id
-INSTAGRAM_GRAPH_API_VERSION=v24.0
-```
-
 4. Verify access:
 
 ```bash
@@ -189,69 +181,14 @@ uv run movie-shorts retry 18
 uv run movie-shorts -help
 ```
 
-## Instagram Reels Publishing
-
-The CLI can publish rendered outputs to Instagram Reels through Meta's resumable upload flow.
-
-Expected setup:
-
-- Instagram professional account
-- The Instagram account linked to a Facebook Page
-- A Meta app with Instagram content publishing access
-- `.env.local` containing:
-  - `INSTAGRAM_ACCESS_TOKEN`
-  - `INSTAGRAM_USER_ID`
-  - optional `INSTAGRAM_GRAPH_API_VERSION`
-
-Quick checks:
-
-```bash
-uv run movie-shorts instagram auth-help
-uv run movie-shorts instagram whoami
-```
-
-Publish a local rendered file:
-
-```bash
-uv run movie-shorts instagram publish artifacts/18/short.mp4 --caption "Final reveal."
-```
-
-Publish a rendered job artifact directly:
-
-```bash
-uv run movie-shorts instagram publish-job 18 --variant 1 --caption "Final reveal."
-```
-
-Publish a fit-mode variant:
-
-```bash
-uv run movie-shorts instagram publish-job 18 --variant 2 --render-mode fit --caption "Wider framing."
-```
-
-Publish a 4:3 fit variant:
-
-```bash
-uv run movie-shorts instagram publish-job 18 --variant 2 --render-mode fit-43 --caption "Larger 4:3 framing."
-```
-
-If you already host the video somewhere public, you can also use URL publishing:
-
-```bash
-uv run movie-shorts instagram publish-url "https://example.com/short.mp4" --caption "Hosted upload."
-```
-
 ## Instagram Browser Upload
 
-The repo also includes a reusable Codex skill for Instagram web uploads when the API route is inconvenient or when you want to drive the real Instagram browser UI:
+The repo includes a reusable Codex skill for Instagram web uploads through the real Instagram browser UI:
 
 - repo skill: `skills/instagram-browser-upload/`
 - paired skill to use with it: `$playwright-interactive`
 
-When to use the browser route:
-
-- your API token flow is incomplete or inconvenient
-- you want to verify the live account visually before posting
-- you need to post through the same Instagram web flow a human would use
+Use the browser route when you want Instagram posting from this repo.
 
 Typical browser-based flow:
 
@@ -328,8 +265,7 @@ uv run movie-shorts render 18
 - Story planning is much better with screenplay or transcript context, but timestamps still come from subtitles.
 - Some titles may have no public script coverage and will fall back to subtitle-only planning.
 - Rendering large 4K sources can take a while because clip extraction and subtitle burn-in re-encode video.
-- Instagram publishing currently uses env-based credentials. A full browser OAuth login flow is not built yet.
-- Browser-based Instagram upload is available through the repo skill, but still depends on a valid local logged-in browser state or a manual login step.
+- Browser-based Instagram upload depends on a valid local logged-in browser state or a manual login step.
 - Render modes:
   - `crop`: center-crop to fill 9:16
   - `fit`: keep the horizontal frame visible inside 9:16 with a blurred background
