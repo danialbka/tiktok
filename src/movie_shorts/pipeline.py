@@ -146,8 +146,7 @@ class Pipeline:
         cues = load_cues(Path(row["local_subtitle_path"]))
 
         job_dir = self.settings.artifact_dir / str(job_id)
-        output_path = job_dir / "short.mp4"
-        variants_dir = job_dir / "variants"
+        output_path, variants_dir, work_dir = self._render_layout_paths(job_dir, render_mode)
         variants_dir.mkdir(parents=True, exist_ok=True)
         self.store.update_job(job_id, status="rendering", last_error=None)
         manifest.render_mode = render_mode
@@ -169,7 +168,7 @@ class Pipeline:
         rendered_outputs: list[Path] = []
         for variant in variant_manifests:
             variant_output = variants_dir / f"short_{variant.variant_id:02d}.mp4"
-            variant_work_dir = job_dir / "work" / f"variant_{variant.variant_id:02d}"
+            variant_work_dir = work_dir / f"variant_{variant.variant_id:02d}"
             variant_manifest = JobManifest(
                 job_id=manifest.job_id,
                 filename=manifest.filename,
@@ -214,6 +213,18 @@ class Pipeline:
             },
         )
         return rendered
+
+    @staticmethod
+    def _render_layout_paths(job_dir: Path, render_mode: str) -> tuple[Path, Path, Path]:
+        if render_mode == "crop":
+            return (job_dir / "short.mp4", job_dir / "variants", job_dir / "work")
+
+        suffix = render_mode.lower()
+        return (
+            job_dir / f"short_{suffix}.mp4",
+            job_dir / f"variants_{suffix}",
+            job_dir / f"work_{suffix}",
+        )
 
     def retry_job(self, job_id: int) -> None:
         self.store.update_job(

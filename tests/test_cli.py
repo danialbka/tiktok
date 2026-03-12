@@ -8,4 +8,5 @@ def test_dash_help_prints_agent_usage(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "Movie Shorts agent usage" in captured.out
     assert "movie-shorts sync --limit 10" in captured.out
-    assert "movie-shorts render <job_id> --render-mode crop|fit" in captured.out
+    assert "movie-shorts render <job_id> --render-mode crop|fit|fit-43" in captured.out
+    assert "movie-shorts instagram publish-job <job_id> --variant 1 --caption" in captured.out

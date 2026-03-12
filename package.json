@@ -1,0 +1,27 @@
+{
+  "name": "realdebrid",
+  "version": "1.0.0",
+  "description": "Generate TikTok-style or Shorts-style vertical videos from movies already in your Real-Debrid account.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danialbka/tiktok.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/danialbka/tiktok/issues"
+  },
+  "homepage": "https://github.com/danialbka/tiktok#readme",
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}

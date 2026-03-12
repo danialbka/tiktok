@@ -130,6 +130,9 @@ def fetch_subtitles(
     query_year: int | None,
     rd_sidecar_subtitle_path: Path | None = None,
 ) -> tuple[Path, str]:
+    if subtitle_path.exists() and subtitle_path.stat().st_size > 0:
+        return subtitle_path, "cached"
+
     embedded = extract_embedded_subtitles(video_path, subtitle_path, language=language)
     if embedded:
         return embedded, "embedded"

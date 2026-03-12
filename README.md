@@ -49,6 +49,14 @@ cp .env.example .env.local
 REAL_DEBRID_API_KEY=your-real-debrid-api-key
 ```
 
+Optional Instagram publishing env vars:
+
+```env
+INSTAGRAM_ACCESS_TOKEN=your-meta-access-token
+INSTAGRAM_USER_ID=your-instagram-professional-user-id
+INSTAGRAM_GRAPH_API_VERSION=v24.0
+```
+
 4. Verify access:
 
 ```bash
@@ -111,6 +119,12 @@ Render with the full horizontal frame preserved inside a 9:16 canvas:
 uv run movie-shorts render 18 --render-mode fit
 ```
 
+Render with a larger 4:3 movie window inside 9:16, similar to some Instagram movie-clip accounts:
+
+```bash
+uv run movie-shorts render 18 --render-mode fit-43
+```
+
 ### 5. Run a small batch
 
 ```bash
@@ -127,6 +141,57 @@ uv run movie-shorts retry 18
 
 ```bash
 uv run movie-shorts -help
+```
+
+## Instagram Reels Publishing
+
+The CLI can publish rendered outputs to Instagram Reels through Meta's resumable upload flow.
+
+Expected setup:
+
+- Instagram professional account
+- The Instagram account linked to a Facebook Page
+- A Meta app with Instagram content publishing access
+- `.env.local` containing:
+  - `INSTAGRAM_ACCESS_TOKEN`
+  - `INSTAGRAM_USER_ID`
+  - optional `INSTAGRAM_GRAPH_API_VERSION`
+
+Quick checks:
+
+```bash
+uv run movie-shorts instagram auth-help
+uv run movie-shorts instagram whoami
+```
+
+Publish a local rendered file:
+
+```bash
+uv run movie-shorts instagram publish artifacts/18/short.mp4 --caption "Final reveal."
+```
+
+Publish a rendered job artifact directly:
+
+```bash
+uv run movie-shorts instagram publish-job 18 --variant 1 --caption "Final reveal."
+```
+
+Publish a fit-mode variant:
+
+```bash
+uv run movie-shorts instagram publish-job 18 --variant 2 --render-mode fit --caption "Wider framing."
+```
+
+Publish a 4:3 fit variant:
+
+```bash
+uv run movie-shorts instagram publish-job 18 --variant 2 --render-mode fit-43 --caption "Larger 4:3 framing."
+```
+
+If you already host the video somewhere public, you can also use URL publishing:
+
+```bash
+uv run movie-shorts instagram publish-url "https://example.com/short.mp4" --caption "Hosted upload."
 ```
 
 ## Output Layout
@@ -181,9 +246,11 @@ uv run movie-shorts render 18
 - Story planning is much better with screenplay or transcript context, but timestamps still come from subtitles.
 - Some titles may have no public script coverage and will fall back to subtitle-only planning.
 - Rendering large 4K sources can take a while because clip extraction and subtitle burn-in re-encode video.
+- Instagram publishing currently uses env-based credentials. A full browser OAuth login flow is not built yet.
 - Render modes:
   - `crop`: center-crop to fill 9:16
   - `fit`: keep the horizontal frame visible inside 9:16 with a blurred background
+  - `fit-43`: use a larger 4:3 movie window inside 9:16 with a blurred background
 - Duration behavior:
   - by default the planner infers how short or long the cut should be from scene continuity and context
   - `--target-duration` overrides that when you want a specific runtime
