@@ -194,6 +194,42 @@ If you already host the video somewhere public, you can also use URL publishing:
 uv run movie-shorts instagram publish-url "https://example.com/short.mp4" --caption "Hosted upload."
 ```
 
+## Instagram Browser Upload
+
+The repo also includes a reusable Codex skill for Instagram web uploads when the API route is inconvenient or when you want to drive the real Instagram browser UI:
+
+- repo skill: `skills/instagram-browser-upload/`
+- paired skill to use with it: `$playwright-interactive`
+
+When to use the browser route:
+
+- your API token flow is incomplete or inconvenient
+- you want to verify the live account visually before posting
+- you need to post through the same Instagram web flow a human would use
+
+Typical browser-based flow:
+
+1. Start a Playwright session.
+2. Load a local saved storage-state file if you have one.
+3. Open Instagram and confirm the active account.
+4. Use `Create -> Post`.
+5. Attach the rendered MP4.
+6. Click through the reel crop/edit screens.
+7. Fill the caption.
+8. Click `Share` and wait for `Reel shared`.
+
+Important:
+
+- keep browser session-state files local and out of git
+- the reusable instructions are committed, but live authenticated state is not
+- a saved local state file can make later uploads much faster when still valid
+
+Example local saved state path used during development:
+
+```text
+.cache/playwright/instagram-eba0.4-state.json
+```
+
 ## Output Layout
 
 - Queue database: `data/movie_shorts.db`
@@ -247,6 +283,7 @@ uv run movie-shorts render 18
 - Some titles may have no public script coverage and will fall back to subtitle-only planning.
 - Rendering large 4K sources can take a while because clip extraction and subtitle burn-in re-encode video.
 - Instagram publishing currently uses env-based credentials. A full browser OAuth login flow is not built yet.
+- Browser-based Instagram upload is available through the repo skill, but still depends on a valid local logged-in browser state or a manual login step.
 - Render modes:
   - `crop`: center-crop to fill 9:16
   - `fit`: keep the horizontal frame visible inside 9:16 with a blurred background
