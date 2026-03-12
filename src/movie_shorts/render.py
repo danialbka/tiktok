@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import subprocess
 import shutil
 
@@ -12,6 +13,56 @@ CAPTION_STYLE = "FontName=Arial WGL Bold Italic,FontSize=11,PrimaryColour=&H0000
 
 def _run(command: list[str]) -> None:
     subprocess.run(command, check=True, text=True, capture_output=True)
+
+
+def probe_audio_streams(video_path: Path) -> list[dict]:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index:stream_tags=language,title",
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout or "{}")
+    return payload.get("streams", [])
+
+
+def _audio_map_args(video_path: Path, preferred_language: str = "en") -> list[str]:
+    streams = probe_audio_streams(video_path)
+    if not streams:
+        return ["-map", "0:a:0?"]
+
+    preferred_tokens = {preferred_language.lower()}
+    if preferred_language.lower() == "en":
+        preferred_tokens.update({"eng", "english"})
+
+    def score(stream: dict) -> tuple[int, int]:
+        tags = stream.get("tags") or {}
+        language = str(tags.get("language") or "").lower()
+        title = str(tags.get("title") or "").lower()
+        value = 0
+        if language in preferred_tokens or any(token in language for token in preferred_tokens):
+            value += 200
+        if any(token in title for token in preferred_tokens):
+            value += 80
+        if any(token in title for token in {"commentary", "description", "descriptive", "director"}):
+            value -= 120
+        if preferred_language.lower() == "en" and any(token in language for token in {"ita", "italian", "fra", "fre", "spa", "es"}):
+            value -= 20
+        return (value, -int(stream.get("index", 0)))
+
+    selected = max(streams, key=score)
+    return ["-map", f"0:{selected['index']}?"]
 
 
 def write_concat_file(paths: list[Path], destination: Path) -> Path:
@@ -50,11 +101,13 @@ def render_short(
     work_dir: Path,
     output_path: Path,
     render_mode: str | None = None,
+    preferred_audio_language: str = "en",
 ) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
     selected_mode = render_mode or manifest.render_mode or "crop"
     filter_flag, filter_value = _video_filter_args(selected_mode)
     preset = _preset_for_mode(selected_mode)
+    audio_map_args = _audio_map_args(source_video, preferred_audio_language)
     parts: list[Path] = []
     for clip_index, clip in enumerate(manifest.clips, start=1):
         part_path = work_dir / f"clip_{clip_index:02d}.mp4"
@@ -70,8 +123,7 @@ def render_short(
             f"{duration_seconds:.3f}",
             "-map",
             "0:v:0",
-            "-map",
-            "0:a:0?",
+            *audio_map_args,
             filter_flag,
             filter_value,
             "-af",

@@ -20,6 +20,7 @@ If you are using Codex or another agent to operate this repo:
 - Pulls subtitles from embedded tracks first.
 - Falls back to Real-Debrid sidecar subtitles when a torrent package includes `.srt` files.
 - Falls back to OpenSubtitles when local subtitle sources are missing.
+- Defaults to English for both subtitles and audio track selection unless you explicitly change `MOVIE_SHORTS_DEFAULT_LANGUAGE`.
 - Enriches planning with script or transcript context in this order:
   - `Script Slug`
   - `IMSDb`
@@ -57,6 +58,12 @@ cp .env.example .env.local
 
 ```env
 REAL_DEBRID_API_KEY=your-real-debrid-api-key
+```
+
+Language defaults stay on English unless you override them:
+
+```env
+MOVIE_SHORTS_DEFAULT_LANGUAGE=en
 ```
 
 4. Verify access:

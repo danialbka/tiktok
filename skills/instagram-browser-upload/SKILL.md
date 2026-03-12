@@ -40,26 +40,54 @@ await page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" })
 
 - Confirm the active account before uploading.
 - Acceptable evidence:
-  - profile/account picker shows the expected handle
+  - the left-nav profile link points to the expected handle
   - Instagram feed loads while signed in
+
+Practical check:
+
+```javascript
+const profileHref = await page.locator('a[href^="/"][href$="/"]').evaluateAll(nodes =>
+  nodes.map(node => node.getAttribute("href")).find(href => href && href !== "/" && href.split("/").length === 3)
+);
+console.log(profileHref);
+```
 
 ## Upload Flow
 
-1. Open the create menu from the left nav.
-   - A working entry was the link with accessible name like `New postCreate`.
-2. Choose `Post`.
-3. Attach the video file.
-   - First try `page.waitForEvent("filechooser")`.
-   - If no chooser appears, set the file on `input[type="file"]`.
-4. If Instagram shows `Video posts are now shared as reels`, click `OK`.
-5. In crop step, click `Next`.
-6. In edit step, click `Next` again.
-7. In the final details step:
-   - caption field may be a `role="textbox"` element named `Write a caption...`
-   - share button may be a `role="button"` named `Share`
-8. After clicking `Share`, wait for either:
+1. From the home feed, click the visible `Create` entry in the left nav.
+   - `page.locator('a:has-text("Create")').first().click()` worked reliably.
+2. In the create popover, click the `Post` link.
+   - `page.getByRole("link", { name: /Post/ }).first().click()`
+3. Attach the video file by setting the existing file input directly.
+   - `await page.locator('input[type="file"]').first().setInputFiles("/abs/path/video.mp4")`
+   - In this flow the input already existed, so this was smoother than waiting for a chooser.
+4. If Instagram shows the `Video posts are now shared as reels` prompt, click `OK`.
+5. On the crop dialog, click the dialog-local `Next`.
+6. On the edit dialog, click `Next` again.
+7. On the final share dialog:
+   - caption field: `getByRole("textbox", { name: /Write a caption/i })`
+   - share button: `getByRole("button", { name: /^Share$/ })`
+8. After clicking `Share`, do not click again if the page shows `Sharing`.
+9. Poll until one of these appears:
    - `Reel shared`
    - `Your reel has been shared.`
+   - or `Sharing` disappears
+
+Known-good share loop:
+
+```javascript
+const dialog = page.locator('[role="dialog"]').first();
+await dialog.getByRole("textbox", { name: /Write a caption/i }).fill("Blood Diamond 💎🎬");
+await dialog.getByRole("button", { name: /^Share$/ }).click();
+
+for (let i = 0; i < 24; i++) {
+  await page.waitForTimeout(5000);
+  const text = await page.locator("body").innerText();
+  if (text.includes("Your reel has been shared.") || text.includes("Reel shared") || !text.includes("Sharing")) {
+    break;
+  }
+}
+```
 
 ## Known Working Caption Pattern
 
@@ -67,6 +95,12 @@ Simple title-plus-emojis works well:
 
 ```text
 The Housemaid 🖤🎬
+```
+
+Also verified:
+
+```text
+Blood Diamond 💎🎬
 ```
 
 ## Persistence
@@ -84,6 +118,8 @@ await context.storageState({
 ## Failure Modes
 
 - If Instagram asks for a password, the saved state is stale.
-- If the upload gets stuck on `Sharing`, wait longer before assuming failure.
+- If the upload sits on `Sharing`, poll for up to a few minutes before assuming failure.
 - If selectors are ambiguous, prefer `getByRole(...)` over plain text matching.
+- For the `Create` opener specifically, `a:has-text("Create")` was more reliable than role/name matching.
+- For the caption field, target the textbox named `Write a caption...` so you do not accidentally hit `Add location` or `Add collaborators`.
 - Keep session files out of git.

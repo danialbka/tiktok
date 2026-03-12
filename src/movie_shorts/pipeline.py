@@ -338,6 +338,7 @@ class Pipeline:
                 variant_work_dir,
                 variant_output,
                 render_mode=render_mode,
+                preferred_audio_language=self.settings.default_language,
             )
             variant.render_output_path = str(rendered_variant)
             rendered_outputs.append(rendered_variant)

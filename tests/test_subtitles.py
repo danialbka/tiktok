@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from movie_shorts.rd import TorrentFile
-from movie_shorts.subtitles import choose_rd_sidecar_subtitle, extract_stored_rar_entry
+from movie_shorts.subtitles import choose_rd_sidecar_subtitle, extract_stored_rar_entry, fetch_subtitles
 
 
 def test_choose_rd_sidecar_subtitle_prefers_root_english_srt() -> None:
@@ -54,6 +54,58 @@ def test_extract_stored_rar_entry_reads_target_entry_from_ranges(tmp_path: Path,
     extract_stored_rar_entry("https://example.invalid/archive.rar", "/subs/english.srt", destination)
 
     assert destination.read_text(encoding="utf-8") == "1\n00:00:00,000 --> 00:00:01,000\nHello\n"
+
+
+def test_fetch_subtitles_refreshes_unknown_cached_file_with_preferred_embedded_language(tmp_path: Path, monkeypatch) -> None:
+    video_path = tmp_path / "movie.mkv"
+    video_path.write_bytes(b"fake-video")
+    subtitle_path = tmp_path / "subtitles.srt"
+    subtitle_path.write_text("old non english subtitle", encoding="utf-8")
+
+    def fake_extract(video_path_arg: Path, output_path_arg: Path, language: str = "en") -> Path | None:
+        assert language == "en"
+        output_path_arg.write_text("fresh english subtitle", encoding="utf-8")
+        return output_path_arg
+
+    monkeypatch.setattr("movie_shorts.subtitles.extract_embedded_subtitles", fake_extract)
+
+    resolved_path, source = fetch_subtitles(
+        video_path=video_path,
+        subtitle_path=subtitle_path,
+        language="en",
+        opensubtitles_api_key=None,
+        query_title="Blood Diamond",
+        query_year=2006,
+    )
+
+    assert source == "embedded"
+    assert resolved_path.read_text(encoding="utf-8") == "fresh english subtitle"
+    assert subtitle_path.with_name("subtitles.srt.meta.json").exists()
+
+
+def test_fetch_subtitles_reuses_cached_file_when_meta_language_matches(tmp_path: Path, monkeypatch) -> None:
+    video_path = tmp_path / "movie.mkv"
+    video_path.write_bytes(b"fake-video")
+    subtitle_path = tmp_path / "subtitles.srt"
+    subtitle_path.write_text("cached english subtitle", encoding="utf-8")
+    subtitle_path.with_name("subtitles.srt.meta.json").write_text('{"source":"embedded","language":"en"}', encoding="utf-8")
+
+    def fail_extract(*args, **kwargs):
+        raise AssertionError("embedded extraction should not run when cached metadata matches")
+
+    monkeypatch.setattr("movie_shorts.subtitles.extract_embedded_subtitles", fail_extract)
+
+    resolved_path, source = fetch_subtitles(
+        video_path=video_path,
+        subtitle_path=subtitle_path,
+        language="en",
+        opensubtitles_api_key=None,
+        query_title="Blood Diamond",
+        query_year=2006,
+    )
+
+    assert source == "cached"
+    assert resolved_path.read_text(encoding="utf-8") == "cached english subtitle"
 
 
 def _build_rar4_archive(entries: list[tuple[str, bytes]]) -> bytes:

@@ -19,6 +19,9 @@ TEXT_SUBTITLE_CODECS = {"subrip", "ass", "ssa", "webvtt", "mov_text"}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
 RAR_MARKER = b"Rar!\x1a\x07\x00"
 TAG_RE = re.compile(r"\{\\.*?\}")
+SUBTITLE_LANGUAGE_ALIASES = {
+    "en": {"en", "eng", "english"},
+}
 
 
 @dataclass(slots=True)
@@ -57,20 +60,30 @@ def extract_embedded_subtitles(video_path: Path, output_path: Path, language: st
         return None
 
     preferred = None
+    preferred_tokens = SUBTITLE_LANGUAGE_ALIASES.get(language.lower(), {language.lower()})
     for stream in streams:
         codec = stream.get("codec_name")
         tags = stream.get("tags") or {}
         if codec not in TEXT_SUBTITLE_CODECS:
             continue
-        if tags.get("language") == language:
-            preferred = stream
-            break
-        if preferred is None:
-            preferred = stream
+        stream_language = str(tags.get("language") or "").lower()
+        stream_title = str(tags.get("title") or "").lower()
+        score = 0
+        if stream_language in preferred_tokens or any(token in stream_language for token in preferred_tokens):
+            score += 200
+        if any(token in stream_title for token in preferred_tokens):
+            score += 80
+        if "forced" in stream_title:
+            score -= 100
+        if "sdh" in stream_title:
+            score -= 10
+        candidate = (score, stream)
+        if preferred is None or candidate[0] > preferred[0]:
+            preferred = candidate
     if not preferred:
         return None
 
-    stream_index = preferred["index"]
+    stream_index = preferred[1]["index"]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     command = [
         "ffmpeg",
@@ -130,15 +143,23 @@ def fetch_subtitles(
     query_year: int | None,
     rd_sidecar_subtitle_path: Path | None = None,
 ) -> tuple[Path, str]:
-    if subtitle_path.exists() and subtitle_path.stat().st_size > 0:
+    cached_meta = _read_cached_subtitle_meta(subtitle_path)
+    if (
+        subtitle_path.exists()
+        and subtitle_path.stat().st_size > 0
+        and cached_meta
+        and cached_meta.get("language") == language
+    ):
         return subtitle_path, "cached"
 
     embedded = extract_embedded_subtitles(video_path, subtitle_path, language=language)
     if embedded:
+        _write_cached_subtitle_meta(subtitle_path, source="embedded", language=language)
         return embedded, "embedded"
 
     if rd_sidecar_subtitle_path and rd_sidecar_subtitle_path.exists():
         shutil.copy2(rd_sidecar_subtitle_path, subtitle_path)
+        _write_cached_subtitle_meta(subtitle_path, source="rd-sidecar", language=language)
         return subtitle_path, "rd-sidecar"
 
     if not opensubtitles_api_key:
@@ -155,6 +176,7 @@ def fetch_subtitles(
     downloaded = download_opensubtitles(opensubtitles_api_key, int(file_id), subtitle_path)
     if downloaded.suffix.lower() == ".zip":
         raise RuntimeError("ZIP subtitle archives are not supported in v1.")
+    _write_cached_subtitle_meta(subtitle_path, source="opensubtitles", language=language)
     return downloaded, "opensubtitles"
 
 
@@ -211,6 +233,28 @@ def choose_rd_sidecar_subtitle(files: list[TorrentFile], language: str = "en") -
 
     candidates.sort(key=lambda pair: pair[0], reverse=True)
     return candidates[0][1] if candidates and candidates[0][0] > 0 else None
+
+
+def _subtitle_meta_path(subtitle_path: Path) -> Path:
+    return subtitle_path.with_name(f"{subtitle_path.name}.meta.json")
+
+
+def _read_cached_subtitle_meta(subtitle_path: Path) -> dict | None:
+    meta_path = _subtitle_meta_path(subtitle_path)
+    if not meta_path.exists():
+        return None
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _write_cached_subtitle_meta(subtitle_path: Path, source: str, language: str) -> None:
+    meta_path = _subtitle_meta_path(subtitle_path)
+    meta_path.write_text(
+        json.dumps({"source": source, "language": language}, indent=2),
+        encoding="utf-8",
+    )
 
 
 def extract_stored_rar_entry(download_url: str, entry_name: str, destination: Path) -> Path:
