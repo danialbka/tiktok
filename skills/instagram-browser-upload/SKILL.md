@@ -7,7 +7,7 @@ description: Use when the user wants to upload or publish an Instagram reel/post
 
 Use this skill when Instagram publishing needs to happen through the web UI instead of the API.
 
-This workflow is written for the local environment at `/root/projects/realdebrid`. Keep session-state files local and out of git.
+Use this workflow from the local project workspace. Keep session-state files local and out of git.
 
 ## Quick Start
 

@@ -270,10 +270,10 @@ Important:
 - the reusable instructions are committed, but live authenticated state is not
 - a saved local state file can make later uploads much faster when still valid
 
-Example local saved state path used during development:
+Example local saved state path:
 
 ```text
-.cache/playwright/instagram-eba0.4-state.json
+.cache/playwright/instagram-browser-state.json
 ```
 
 ## Output Layout
