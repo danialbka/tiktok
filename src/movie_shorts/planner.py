@@ -77,6 +77,19 @@ class SubtitleWindow:
     transcript_score: float
     script_score: float = 0.0
     script_match_excerpt: str | None = None
+    screenplay_scene: str | None = None
+    screenplay_scene_index: int | None = None
+    screenplay_source: str | None = None
+
+
+@dataclass(slots=True)
+class ScreenplayScene:
+    heading: str
+    text: str
+    tokens: set[str]
+    order: int
+    provider: str
+    source_title: str
 
 
 def _window_summary(text: str, limit: int = 18) -> str:
@@ -177,47 +190,99 @@ def _chunk_script_text(text: str) -> list[str]:
     return chunks[:120]
 
 
-def _load_script_segments(script_context: list[ScriptContextSource]) -> list[str]:
-    segments: list[str] = []
+def _extract_scene_heading(text: str, order: int) -> str:
+    stripped = text.strip()
+    heading_match = re.match(r"((?:INT|EXT|INT/EXT|EXT/INT)\.[^A-Z]{0,80})", stripped)
+    if heading_match:
+        heading = _clean_scene_heading(heading_match.group(1))
+        if heading:
+            return heading
+    preview = _window_summary(stripped, limit=10)
+    return preview or f"Scene {order}"
+
+
+def _clean_scene_heading(text: str) -> str:
+    words = WORD_RE.findall(text.upper())
+    if not words:
+        return ""
+    return " ".join(words[:10]).strip()
+
+
+def _parse_script_scenes(text: str, provider: str, source_title: str) -> list[ScreenplayScene]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    chunks = [chunk.strip() for chunk in SCENE_SPLIT_RE.split(stripped) if chunk.strip()]
+    if len(chunks) <= 1:
+        chunks = _chunk_script_text(stripped)
+
+    scenes: list[ScreenplayScene] = []
+    for chunk in chunks[:150]:
+        tokens = _tokenize(chunk)
+        if not tokens:
+            continue
+        order = len(scenes) + 1
+        scenes.append(
+            ScreenplayScene(
+                heading=_extract_scene_heading(chunk, order),
+                text=chunk,
+                tokens=tokens,
+                order=order,
+                provider=provider,
+                source_title=source_title,
+            )
+        )
+    return scenes
+
+
+def _load_script_scenes(script_context: list[ScriptContextSource]) -> list[ScreenplayScene]:
+    scene_sets: list[list[ScreenplayScene]] = []
     for source in script_context:
-        if source.summary:
-            segments.extend(_chunk_script_text(source.summary))
         if source.script_text_path:
             path = Path(source.script_text_path)
             if path.exists():
                 text = path.read_text(encoding="utf-8", errors="ignore")
-                segments.extend(_chunk_script_text(text))
-    return segments[:250]
+                scenes = _parse_script_scenes(text, source.provider, source.title)
+                if scenes:
+                    scene_sets.append(scenes)
+        elif source.summary:
+            scenes = _parse_script_scenes(source.summary, source.provider, source.title)
+            if scenes:
+                scene_sets.append(scenes)
+    if not scene_sets:
+        return []
+    return max(scene_sets, key=len)[:150]
 
 
 def _apply_script_context(windows: list[SubtitleWindow], script_context: list[ScriptContextSource]) -> None:
-    segments = _load_script_segments(script_context)
-    if not segments:
+    scenes = _load_script_scenes(script_context)
+    if not scenes:
         return
 
-    scored_segments = [(segment, _tokenize(segment)) for segment in segments]
     for window in windows:
         window_tokens = _tokenize(window.text)
         if not window_tokens:
             continue
 
         best_score = 0.0
-        best_excerpt: str | None = None
-        for segment, segment_tokens in scored_segments:
-            if not segment_tokens:
-                continue
-            overlap = window_tokens & segment_tokens
+        best_scene: ScreenplayScene | None = None
+        for scene in scenes:
+            overlap = window_tokens & scene.tokens
             if not overlap:
                 continue
             density = len(overlap) / max(len(window_tokens), 1)
-            coverage = len(overlap) / max(min(len(window_tokens), len(segment_tokens)), 1)
+            coverage = len(overlap) / max(min(len(window_tokens), len(scene.tokens)), 1)
             score = density * 8.0 + coverage * 10.0 + len(overlap) * 1.5
             if score > best_score:
                 best_score = score
-                best_excerpt = _window_summary(segment, limit=22)
+                best_scene = scene
 
         window.script_score = round(best_score, 2)
-        window.script_match_excerpt = best_excerpt
+        window.script_match_excerpt = _window_summary(best_scene.text, limit=22) if best_scene else None
+        window.screenplay_scene = best_scene.heading if best_scene else None
+        window.screenplay_scene_index = best_scene.order if best_scene else None
+        window.screenplay_source = best_scene.provider if best_scene else None
         window.score = round(window.transcript_score + best_score, 2)
 
 
@@ -318,6 +383,28 @@ def _continuity_bonus(left: SubtitleWindow, right: SubtitleWindow) -> float:
     return (len(overlap) / max(min(len(left_tokens), len(right_tokens)), 1)) * 10.0
 
 
+def _screenplay_sequence_bonus(left: SubtitleWindow, right: SubtitleWindow) -> float:
+    if left.screenplay_scene_index is None or right.screenplay_scene_index is None:
+        return 0.0
+    delta = right.screenplay_scene_index - left.screenplay_scene_index
+    if delta == 0:
+        return 2.0
+    if delta == 1:
+        return 5.0
+    if delta == 2:
+        return 2.5
+    if delta < 0:
+        return -6.0
+    return -min(4.5, float(delta - 2) * 1.2)
+
+
+def _screenplay_alignment_ratio(windows: list[SubtitleWindow]) -> float:
+    if not windows:
+        return 0.0
+    aligned = sum(1 for window in windows if window.screenplay_scene_index is not None)
+    return aligned / len(windows)
+
+
 def choose_story_beats(
     cues: list[SubtitleCue],
     max_duration_seconds: int,
@@ -340,12 +427,18 @@ def choose_story_beats(
     if target_duration_seconds and target_duration_seconds >= 90:
         scene_blocks = build_scene_blocks(cues)
         _apply_script_context(scene_blocks, script_context or [])
+        has_screenplay_mapping = any(window.screenplay_scene_index is not None for window in scene_blocks)
         selected_windows = _select_contiguous_story_arc(scene_blocks, target_duration_ms)
         beats, clips = _build_clips(selected_windows, target_duration_ms, total_runtime_ms, chronological=True)
-        planner_notes = [
-            f"Planner targeted approximately {target_duration_seconds} seconds using a contiguous chronological story arc.",
-            "Planner uses subtitle scene blocks scored for intrigue, dialogue density, script overlap, and continuity between neighboring scenes.",
-        ]
+        planner_notes = [f"Planner targeted approximately {target_duration_seconds} seconds using a contiguous chronological story arc."]
+        if has_screenplay_mapping:
+            planner_notes.append(
+                "Planner maps subtitle scene blocks onto screenplay scenes, then favors arcs that move through neighboring screenplay scenes with strong dialogue continuity."
+            )
+        else:
+            planner_notes.append(
+                "Planner groups subtitles into scene-like blocks and favors arcs with strong chronological dialogue continuity when screenplay scenes are unavailable."
+            )
     else:
         hook = max(windows, key=lambda item: item.score)
 
@@ -387,16 +480,17 @@ def choose_story_beats(
         planner_notes=planner_notes,
     )
     if any(window.script_score > 0 for window in windows):
-        manifest.planner_notes.append("Planner re-scored subtitle windows using screenplay overlap from Script Slug/IMSDb context.")
+        manifest.planner_notes.append("Planner re-scored subtitle windows using screenplay or transcript overlap from fetched script context.")
     return manifest
 
 
 def _build_source_reason(beat_type: str, window: SubtitleWindow) -> str:
     if window.script_score > 0 and window.script_match_excerpt:
+        scene_label = f" Matched screenplay scene: {window.screenplay_scene}." if window.screenplay_scene else ""
         return (
             f"Selected for {beat_type} using transcript energy {window.transcript_score:.2f} "
             f"plus script-context overlap {window.script_score:.2f}. "
-            f"Closest screenplay context: {window.script_match_excerpt}"
+            f"Closest screenplay context: {window.script_match_excerpt}.{scene_label}"
         )
     return f"Selected for {beat_type} using transcript energy score {window.transcript_score:.2f}."
 
@@ -439,18 +533,32 @@ def _select_contiguous_story_arc(ordered: list[SubtitleWindow], target_duration_
             average_score = sum(window.score for window in window_slice) / len(window_slice)
             continuity = sum(_continuity_bonus(window_slice[i], window_slice[i + 1]) for i in range(len(window_slice) - 1))
             continuity /= max(len(window_slice) - 1, 1)
+            screenplay_continuity = sum(
+                _screenplay_sequence_bonus(window_slice[i], window_slice[i + 1])
+                for i in range(len(window_slice) - 1)
+            )
+            screenplay_continuity /= max(len(window_slice) - 1, 1)
             first_third = window_slice[: max(1, len(window_slice) // 3)]
             last_third = window_slice[-max(1, len(window_slice) // 3) :]
             setup_score = sum(window.script_score + window.transcript_score * 0.35 for window in first_third) / len(first_third)
             payoff_score = sum(window.score for window in last_third) / len(last_third)
             progression = max(0.0, payoff_score - setup_score) * 0.45
+            screenplay_alignment = _screenplay_alignment_ratio(window_slice) * 3.0
             large_gap_penalty = 0.0
             for left, right in zip(window_slice, window_slice[1:]):
                 gap_ms = max(0, right.start_ms - left.end_ms)
                 if gap_ms > 9_000:
                     large_gap_penalty += min(3.5, gap_ms / 6_000)
             duration_penalty = abs(span_ms - target_duration_ms) / max(target_duration_ms, 1) * 4.0
-            score = average_score + continuity + progression - duration_penalty - large_gap_penalty
+            score = (
+                average_score
+                + continuity
+                + screenplay_continuity
+                + screenplay_alignment
+                + progression
+                - duration_penalty
+                - large_gap_penalty
+            )
             if score > best_score:
                 best_score = score
                 best_slice = (start_index, end_index)
@@ -465,10 +573,14 @@ def _select_contiguous_story_arc(ordered: list[SubtitleWindow], target_duration_
         right_gain = float("-inf")
         if start_index > 0:
             left = ordered[start_index - 1]
-            left_gain = left.score + _continuity_bonus(left, ordered[start_index])
+            left_gain = left.score + _continuity_bonus(left, ordered[start_index]) + _screenplay_sequence_bonus(left, ordered[start_index])
         if end_index < len(ordered):
             right = ordered[end_index]
-            right_gain = right.score + _continuity_bonus(ordered[end_index - 1], right)
+            right_gain = (
+                right.score
+                + _continuity_bonus(ordered[end_index - 1], right)
+                + _screenplay_sequence_bonus(ordered[end_index - 1], right)
+            )
 
         if right_gain >= left_gain and end_index < len(ordered):
             end_index += 1
@@ -527,6 +639,8 @@ def _build_clips(
                 output_start_ms=output_cursor_ms,
                 output_end_ms=output_cursor_ms + int(clip_end - clip_start),
                 summary=_window_summary(window.text),
+                screenplay_scene=window.screenplay_scene,
+                screenplay_scene_index=window.screenplay_scene_index,
             )
         )
         output_cursor_ms += int(clip_end - clip_start)
@@ -541,6 +655,9 @@ def _build_clips(
             score=round(windows[index].score, 2),
             summary=clip.summary,
             source_reason=_build_source_reason(clip.beat_type, windows[index]),
+            screenplay_scene=windows[index].screenplay_scene,
+            screenplay_scene_index=windows[index].screenplay_scene_index,
+            screenplay_source=windows[index].screenplay_source,
         )
         for index, clip in enumerate(clips)
     ]

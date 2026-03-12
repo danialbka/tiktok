@@ -6,7 +6,7 @@ import subprocess
 from .models import JobManifest, SubtitleCue
 
 
-CAPTION_STYLE = "FontName=Arial,FontSize=11,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=70,Alignment=2"
+CAPTION_STYLE = "FontName=Arial WGL Bold Italic,FontSize=11,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=70,Alignment=2"
 
 
 def _run(command: list[str]) -> None:

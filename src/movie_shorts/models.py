@@ -58,6 +58,9 @@ class StoryBeat:
     score: float
     summary: str
     source_reason: str
+    screenplay_scene: str | None = None
+    screenplay_scene_index: int | None = None
+    screenplay_source: str | None = None
 
 
 @dataclass(slots=True)
@@ -68,6 +71,8 @@ class RenderClip:
     output_start_ms: int
     output_end_ms: int
     summary: str
+    screenplay_scene: str | None = None
+    screenplay_scene_index: int | None = None
 
 
 @dataclass(slots=True)

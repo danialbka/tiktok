@@ -1,3 +1,4 @@
+.env
 .venv/
 __pycache__/
 *.pyc
@@ -10,4 +11,3 @@ __pycache__/
 .cache/
 data/
 artifacts/
-

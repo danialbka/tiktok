@@ -106,7 +106,7 @@ class Pipeline:
         manifest.script_context = script_context
         if script_context:
             manifest.planner_notes.append(
-                "Script context saved from Script Slug/IMSDb and used to guide beat selection."
+                "Script context was fetched and used to guide beat selection."
             )
         elif script_context_error:
             manifest.planner_notes.append(f"Script context fetch skipped after error: {script_context_error}")

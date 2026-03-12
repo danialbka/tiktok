@@ -11,7 +11,42 @@ import httpx
 from .models import DownloadItem
 
 
-TITLE_YEAR_RE = re.compile(r"(?P<title>.+?)(?:[.\s\-_()]+(?P<year>19\d{2}|20\d{2}))?")
+YEAR_RE = re.compile(r"^(19\d{2}|20\d{2})$")
+NOISE_TOKENS = {
+    "2160p",
+    "1080p",
+    "720p",
+    "480p",
+    "4k",
+    "web",
+    "webrip",
+    "webdl",
+    "web-dl",
+    "bluray",
+    "brrip",
+    "dvdrip",
+    "hdrip",
+    "x264",
+    "x265",
+    "h264",
+    "h265",
+    "hevc",
+    "10bit",
+    "8bit",
+    "aac",
+    "aac5",
+    "aac51",
+    "ddp5",
+    "ddp51",
+    "yts",
+    "ytsbz",
+    "proper",
+    "repack",
+    "extended",
+    "remastered",
+    "dubbed",
+    "subbed",
+}
 
 
 @dataclass(slots=True)
@@ -155,10 +190,31 @@ class RealDebridClient:
 
     @staticmethod
     def infer_metadata(filename: str) -> dict[str, str | int | None]:
-        stem = Path(filename).stem.replace(".", " ").replace("_", " ")
-        match = TITLE_YEAR_RE.match(stem)
-        title = (match.group("title") if match else stem).strip()
-        year = int(match.group("year")) if match and match.group("year") else None
+        stem = Path(filename).stem
+        tokens = [token for token in re.split(r"[\s._()\-\[\]]+", stem) if token]
+
+        year_index: int | None = None
+        year: int | None = None
+        for index, token in enumerate(tokens):
+            if YEAR_RE.match(token):
+                year_index = index
+                year = int(token)
+                break
+
+        if year_index is not None and year_index > 0:
+            title_tokens = tokens[:year_index]
+        else:
+            title_tokens = []
+            for token in tokens:
+                normalized = re.sub(r"[^a-z0-9]+", "", token.lower())
+                if normalized in NOISE_TOKENS:
+                    break
+                title_tokens.append(token)
+
+        if not title_tokens:
+            title_tokens = tokens[:]
+
+        title = " ".join(title_tokens).strip()
         return {"parsed_title": title, "parsed_year": year}
 
     @staticmethod

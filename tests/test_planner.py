@@ -49,7 +49,49 @@ def test_choose_story_beats_uses_script_context_to_reweight_windows(tmp_path: Pa
     assert manifest.beats
     assert "scriptplay overlap" not in manifest.beats[0].source_reason.lower()
     assert any("script-context overlap" in beat.source_reason for beat in manifest.beats)
-    assert any("screenplay overlap" in note.lower() for note in manifest.planner_notes)
+    assert any("script context" in note.lower() or "screenplay or transcript overlap" in note.lower() for note in manifest.planner_notes)
+    assert any(beat.screenplay_scene for beat in manifest.beats)
+
+
+def test_longform_planner_maps_beats_to_screenplay_scenes(tmp_path: Path) -> None:
+    cues = [
+        SubtitleCue(index=1, start_ms=0, end_ms=6_000, text="We made it to the lake house before dark."),
+        SubtitleCue(index=2, start_ms=6_400, end_ms=13_000, text="The red door is open and the family is waiting."),
+        SubtitleCue(index=3, start_ms=21_000, end_ms=27_000, text="At dinner the mother studies the old clock."),
+        SubtitleCue(index=4, start_ms=27_300, end_ms=34_000, text="She says midnight changes everything here."),
+        SubtitleCue(index=5, start_ms=42_000, end_ms=48_000, text="The tunnel is underneath the shed behind the house."),
+        SubtitleCue(index=6, start_ms=48_300, end_ms=55_000, text="If we run now the children might survive."),
+    ]
+    script_path = tmp_path / "scriptslug_script.txt"
+    script_path.write_text(
+        "INT. LAKE HOUSE - NIGHT The family reaches the red door before dark and waits in silence. "
+        "INT. DINING ROOM - NIGHT The mother studies the old clock and warns that midnight changes everything. "
+        "EXT. SHED - NIGHT A hidden tunnel waits underneath the shed behind the house.",
+        encoding="utf-8",
+    )
+    script_context = [
+        ScriptContextSource(
+            provider="scriptslug",
+            title="Example Movie",
+            url="https://www.scriptslug.com/script/example-2026",
+            script_text_path=str(script_path),
+            source_kind="script_text",
+        )
+    ]
+
+    manifest = choose_story_beats(
+        cues,
+        max_duration_seconds=180,
+        script_context=script_context,
+        target_duration_seconds=90,
+    )
+
+    assert any("maps subtitle scene blocks onto screenplay scenes" in note.lower() for note in manifest.planner_notes)
+    assert all(clip.screenplay_scene for clip in manifest.clips)
+    assert manifest.clips[0].screenplay_scene_index == 1
+    assert manifest.clips[1].screenplay_scene_index in {1, 2}
+    assert manifest.clips[-1].screenplay_scene_index >= manifest.clips[0].screenplay_scene_index
+    assert "matched screenplay scene" in manifest.beats[0].source_reason.lower()
 
 
 def test_choose_story_beats_can_target_longer_duration() -> None:
